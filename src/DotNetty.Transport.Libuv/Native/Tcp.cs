@@ -4,7 +4,7 @@
 namespace DotNetty.Transport.Libuv.Native
 {
     using System;
-    using System.Diagnostics.Contracts;
+    using System.Diagnostics;
     using System.Net;
     using DotNetty.Buffers;
     using DotNetty.Common.Internal;
@@ -19,19 +19,16 @@ namespace DotNetty.Transport.Libuv.Native
 
         public Tcp(Loop loop) : base(loop)
         {
-            this.pendingReads = PlatformDependent.SpscLinkedQueue<ReadOperation>();
+            this.pendingReads = PlatformDependent.NewSpscLinkedQueue<ReadOperation>();
         }
 
         public void ReadStart(INativeUnsafe channel)
         {
-            Contract.Requires(channel != null);
+            Debug.Assert(channel != null);
 
             this.Validate();
             int result = NativeMethods.uv_read_start(this.Handle, AllocateCallback, ReadCallback);
-            if (result < 0)
-            {
-                throw NativeMethods.CreateError((uv_err_code)result);
-            }
+            NativeMethods.ThrowIfError(result);
 
             this.unsafeChannel = channel;
         }
@@ -45,10 +42,7 @@ namespace DotNetty.Transport.Libuv.Native
 
             // This function is idempotent and may be safely called on a stopped stream.
             int result = NativeMethods.uv_read_stop(this.Handle);
-            if (result < 0)
-            {
-                throw NativeMethods.CreateError((uv_err_code)result);
-            }
+            NativeMethods.ThrowIfError(result);
         }
 
         static void OnReadCallback(IntPtr handle, IntPtr nread, ref uv_buf_t buf)
@@ -57,7 +51,7 @@ namespace DotNetty.Transport.Libuv.Native
             int status = (int)nread.ToInt64();
 
             OperationException error = null;
-            if (status < 0 && status != (int)uv_err_code.UV_EOF)
+            if (status < 0 && status != NativeMethods.EOF)
             {
                 error = NativeMethods.CreateError((uv_err_code)status);
             }
@@ -65,19 +59,17 @@ namespace DotNetty.Transport.Libuv.Native
             ReadOperation operation = tcp.pendingReads.Poll();
             if (operation == null)
             {
-                if (error != null)
+                if (error == null)
                 {
-                    // It is possible if the client connection resets  
-                    // causing errors where there are no pending read
-                    // operations, in this case we just notify the channel
-                    // for errors
-                    operation = new ReadOperation(tcp.unsafeChannel, Unpooled.Empty);
-                }
-                else
-                {
-                    Logger.Warn("Channel read operation completed prematurely.");
+                    Logger.Warn($"Tcp {tcp.Handle} read operation completed prematurely.");
                     return;
                 }
+
+                // It is possible if the client connection resets  
+                // causing errors where there are no pending read
+                // operations, in this case we just notify the channel
+                // for errors
+                operation = new ReadOperation(tcp.unsafeChannel, Unpooled.Empty);
             }
 
             try
@@ -86,32 +78,27 @@ namespace DotNetty.Transport.Libuv.Native
             }
             catch (Exception exception)
             {
-                Logger.Warn("Channel read callbcak failed.", exception);
+                Logger.Warn($"Tcp {tcp.Handle} read callbcak failed.", exception);
             }
         }
 
         public void Write(WriteRequest request)
         {
             this.Validate();
-            int result;
             try
             {
-                result = NativeMethods.uv_write(
+                int result = NativeMethods.uv_write(
                     request.Handle,
                     this.Handle,
                     request.Bufs,
                     request.BufferCount,
                     WriteRequest.WriteCallback);
+                NativeMethods.ThrowIfError(result);
             }
             catch
             {
-                request?.Release();
+                request.Release();
                 throw;
-            }
-
-            if (result < 0)
-            {
-                throw NativeMethods.CreateError((uv_err_code)result);
             }
         }
 
@@ -129,7 +116,6 @@ namespace DotNetty.Transport.Libuv.Native
 
                 operation.Dispose();
             }
-
             this.unsafeChannel = null;
         }
 

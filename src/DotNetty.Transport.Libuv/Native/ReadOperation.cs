@@ -1,54 +1,59 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+// ReSharper disable ConvertToAutoProperty
+// ReSharper disable ConvertToAutoPropertyWithPrivateSetter
+// ReSharper disable ConvertToAutoPropertyWhenPossible
 namespace DotNetty.Transport.Libuv.Native
 {
     using System;
+    using System.Diagnostics;
     using System.Runtime.InteropServices;
     using DotNetty.Buffers;
 
     public sealed class ReadOperation : IDisposable
     {
+        readonly IByteBuffer buffer;
         readonly INativeUnsafe nativeUnsafe;
-        GCHandle array;
+
+        GCHandle gcHandle;
+        int status;
+        bool endOfStream;
+        OperationException error;
 
         internal ReadOperation(INativeUnsafe nativeUnsafe, IByteBuffer buffer)
         {
             this.nativeUnsafe = nativeUnsafe;
-            this.Buffer = buffer;
-            this.Status = 0;
-            this.EndOfStream = false;
+            this.buffer = buffer;
+            this.status = 0;
+            this.endOfStream = false;
         }
 
-        internal IByteBuffer Buffer { get; }
+        internal IByteBuffer Buffer => this.buffer;
 
-        internal OperationException Error { get; private set; }
+        internal OperationException Error => this.error;
 
-        internal int Status { get; private set; }
+        internal int Status => this.status;
 
-        internal bool EndOfStream { get; private set; }
+        internal bool EndOfStream => this.endOfStream;
 
-        internal void Complete(int status, OperationException error)
+        internal void Complete(int statusCode, OperationException operationException)
         {
             this.Release();
 
-            this.Status = status;
-            this.EndOfStream = status == (int)uv_err_code.UV_EOF;
-            this.Error = error;
+            this.status = statusCode;
+            this.endOfStream = statusCode == NativeMethods.EOF;
+            this.error = operationException;
             this.nativeUnsafe.FinishRead(this);
         }
 
         internal uv_buf_t GetBuffer()
         {
-            if (this.array.IsAllocated)
-            {
-                throw new InvalidOperationException(
-                    $"{nameof(ReadOperation)} has already been initialized and not released yet.");
-            }
+            Debug.Assert(!this.gcHandle.IsAllocated, $"{nameof(ReadOperation)} has already been initialized and not released yet.");
 
-            IByteBuffer buf = this.Buffer;
-            this.array = GCHandle.Alloc(buf.Array, GCHandleType.Pinned);
-            IntPtr arrayHandle = this.array.AddrOfPinnedObject();
+            IByteBuffer buf = this.buffer;
+            this.gcHandle = GCHandle.Alloc(buf.Array, GCHandleType.Pinned);
+            IntPtr arrayHandle = this.gcHandle.AddrOfPinnedObject();
 
             int index = buf.ArrayOffset + buf.WriterIndex;
             int length = buf.WritableBytes;
@@ -58,9 +63,9 @@ namespace DotNetty.Transport.Libuv.Native
 
         void Release()
         {
-            if (this.array.IsAllocated)
+            if (this.gcHandle.IsAllocated)
             {
-                this.array.Free();
+                this.gcHandle.Free();
             }
         }
 

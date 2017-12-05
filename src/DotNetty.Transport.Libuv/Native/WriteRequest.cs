@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+// ReSharper disable ConvertToAutoPropertyWithPrivateSetter
 namespace DotNetty.Transport.Libuv.Native
 {
     using System;
@@ -15,6 +16,7 @@ namespace DotNetty.Transport.Libuv.Native
         readonly ThreadLocalPool.Handle recyclerHandle;
         readonly List<GCHandle> handles;
 
+        OperationException error;
         INativeUnsafe nativeUnsafe;
         uv_buf_t[] bufs;
         int bufferCount;
@@ -71,33 +73,32 @@ namespace DotNetty.Transport.Libuv.Native
 
         internal ref int BufferCount => ref this.bufferCount;
 
-        internal OperationException Error { get; private set; }
+        internal OperationException Error => this.error;
 
         internal void Release()
         {
             this.ReleaseHandles();
 
             this.nativeUnsafe = null;
-            this.Error = null;
+            this.error = null;
             this.recyclerHandle.Release(this);
         }
 
         void ReleaseHandles()
         {
             this.bufferCount = 0;
-            if (this.handles.Count == 0)
+            if (this.handles.Count > 0)
             {
-                return;
-            }
-
-            foreach (GCHandle handle in this.handles)
-            {
-                if (handle.IsAllocated)
+                // ReSharper disable once ForCanBeConvertedToForeach
+                for (int i = 0; i < this.handles.Count; i++)
                 {
-                    handle.Free();
+                    if (this.handles[i].IsAllocated)
+                    {
+                        this.handles[i].Free();
+                    }
                 }
+                this.handles.Clear();
             }
-            this.handles.Clear();
         }
 
         protected override void Dispose(bool disposing)
@@ -112,12 +113,10 @@ namespace DotNetty.Transport.Libuv.Native
         void OnWriteCallback(int status)
         {
             this.ReleaseHandles();
-
             if (status < 0)
             {
-                this.Error = NativeMethods.CreateError((uv_err_code)status);
+                this.error = NativeMethods.CreateError((uv_err_code)status);
             }
-
             this.nativeUnsafe.FinishWrite(this);
         }
 

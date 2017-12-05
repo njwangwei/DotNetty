@@ -23,7 +23,7 @@ namespace DotNetty.Transport.Libuv.Native
             {
                 result = NativeMethods.uv_pipe_init(loop.Handle, handle, ipc ? 1 : 0);
             }
-            catch (Exception)
+            catch
             {
                 Marshal.FreeHGlobal(handle);
                 throw;
@@ -31,7 +31,7 @@ namespace DotNetty.Transport.Libuv.Native
             if (result < 0)
             {
                 Marshal.FreeHGlobal(handle);
-                throw NativeMethods.CreateError((uv_err_code)result);
+                NativeMethods.ThrowOperationException((uv_err_code)result);
             }
 
             GCHandle gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
@@ -45,10 +45,7 @@ namespace DotNetty.Transport.Libuv.Native
 
             this.Validate();
             int result = NativeMethods.uv_pipe_bind(this.Handle, name);
-            if (result < 0)
-            {
-                throw NativeMethods.CreateError((uv_err_code)result);
-            }
+            NativeMethods.ThrowIfError(result);
         }
 
         public string GetSocketName()
@@ -62,10 +59,7 @@ namespace DotNetty.Transport.Libuv.Native
                 var length = (IntPtr)NameBufferSize;
 
                 int result = NativeMethods.uv_pipe_getsockname(this.Handle, buf, ref length);
-                if (result < 0)
-                {
-                    throw NativeMethods.CreateError((uv_err_code)result);
-                }
+                NativeMethods.ThrowIfError(result);
 
                 socketName = Marshal.PtrToStringAnsi(buf, length.ToInt32());
             }
@@ -91,10 +85,7 @@ namespace DotNetty.Transport.Libuv.Native
                 var length = (IntPtr)NameBufferSize;
 
                 int result = NativeMethods.uv_pipe_getpeername(this.Handle, buf, ref length);
-                if (result < 0)
-                {
-                    throw NativeMethods.CreateError((uv_err_code)result);
-                }
+                NativeMethods.ThrowIfError(result);
 
                 peerName = Marshal.PtrToStringAnsi(buf, length.ToInt32());
             }

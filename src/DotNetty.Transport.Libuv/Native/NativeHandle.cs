@@ -5,7 +5,7 @@ namespace DotNetty.Transport.Libuv.Native
 {
     using DotNetty.Common.Internal.Logging;
     using System;
-    using System.Diagnostics.Contracts;
+    using System.Diagnostics;
     using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
 
@@ -22,18 +22,20 @@ namespace DotNetty.Transport.Libuv.Native
 
         internal uv_handle_type HandleType { get; }
 
-        internal bool IsValid => this.Handle != IntPtr.Zero;
+        internal bool IsValid
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => this.Handle != IntPtr.Zero;
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected internal void Validate()
         {
             if (!this.IsValid)
             {
-                ThrowObjectDisposedException(this.GetType().Name);
+                NativeMethods.ThrowObjectDisposedException($"{this.HandleType} has already been disposed {this.GetType()}");
             }
         }
-
-        static void ThrowObjectDisposedException(string typeName) => throw new ObjectDisposedException($"{typeName} has already been disposed");
 
         internal void RemoveReference()
         {
@@ -93,11 +95,10 @@ namespace DotNetty.Transport.Libuv.Native
         {
             try
             {
-                if (!this.IsValid)
+                if (this.IsValid)
                 {
-                    return;
+                    this.CloseHandle();
                 }
-                this.CloseHandle();
             }
             catch (Exception exception)
             {
@@ -113,14 +114,11 @@ namespace DotNetty.Transport.Libuv.Native
             GC.SuppressFinalize(this);
         }
 
-        ~NativeHandle()
-        {
-            this.Dispose(false);
-        }
+        ~NativeHandle() => this.Dispose(false);
 
         internal static T GetTarget<T>(IntPtr handle)
         {
-            Contract.Requires(handle != IntPtr.Zero);
+            Debug.Assert(handle != IntPtr.Zero);
 
             IntPtr inernalHandle = ((uv_handle_t*)handle)->data;
             if (inernalHandle != IntPtr.Zero)
@@ -131,7 +129,6 @@ namespace DotNetty.Transport.Libuv.Native
                     return (T)gcHandle.Target;
                 }
             }
-
             return default(T);
         }
     }

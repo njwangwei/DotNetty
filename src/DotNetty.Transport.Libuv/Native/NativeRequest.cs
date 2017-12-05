@@ -5,18 +5,18 @@ namespace DotNetty.Transport.Libuv.Native
 {
     using DotNetty.Common.Internal.Logging;
     using System;
-    using System.Diagnostics.Contracts;
+    using System.Diagnostics;
     using System.Runtime.InteropServices;
 
     abstract unsafe class NativeRequest : IDisposable
     {
         protected static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<NativeRequest>();
+
         protected internal IntPtr Handle;
 
         protected NativeRequest(uv_req_type requestType, int size)
         {
-            int totalSize = NativeMethods.uv_req_size(requestType).ToInt32();
-            totalSize += size;
+            int totalSize = NativeMethods.uv_req_size(requestType).ToInt32() + size;
             IntPtr handle = Marshal.AllocHGlobal(totalSize);
 
             GCHandle gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
@@ -60,11 +60,10 @@ namespace DotNetty.Transport.Libuv.Native
         {
             try
             {
-                if (!this.IsValid)
+                if (this.IsValid)
                 {
-                    return;
+                    this.CloseHandle();
                 }
-                this.CloseHandle();
             }
             catch (Exception exception)
             {
@@ -81,14 +80,11 @@ namespace DotNetty.Transport.Libuv.Native
             GC.SuppressFinalize(this);
         }
 
-        ~NativeRequest()
-        {
-            this.Dispose(false);
-        }
+        ~NativeRequest() => this.Dispose(false);
 
         internal static T GetTarget<T>(IntPtr handle)
         {
-            Contract.Requires(handle != IntPtr.Zero);
+            Debug.Assert(handle != IntPtr.Zero);
 
             IntPtr internalHandle = ((uv_req_t*)handle)->data;
             if (internalHandle != IntPtr.Zero)
@@ -99,7 +95,6 @@ namespace DotNetty.Transport.Libuv.Native
                     return (T)gcHandle.Target;
                 }
             }
-
             return default(T);
         }
     }

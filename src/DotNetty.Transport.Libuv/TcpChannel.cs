@@ -5,7 +5,6 @@ namespace DotNetty.Transport.Libuv
 {
     using System;
     using System.Collections.Generic;
-    using System.Diagnostics;
     using System.Net;
     using DotNetty.Buffers;
     using DotNetty.Common;
@@ -34,11 +33,6 @@ namespace DotNetty.Transport.Libuv
             this.tcp = tcp;
             if (this.tcp != null)
             {
-                if (this.config.TcpNoDelay)
-                {
-                    tcp.NoDelay(true);
-                }
-
                 this.OnConnected();
             }
         }
@@ -55,24 +49,17 @@ namespace DotNetty.Transport.Libuv
 
         protected override void DoRegister()
         {
-            if (this.tcp != null)
+            if (this.tcp == null)
             {
-                ((TcpChannelUnsafe)this.Unsafe).ScheduleRead();
+                var loopExecutor = (LoopExecutor)this.EventLoop;
+                this.tcp = new Tcp(loopExecutor.UnsafeLoop);
             }
             else
             {
-                var loopExecutor = (ILoopExecutor)this.EventLoop;
-                Loop loop = loopExecutor.UnsafeLoop;
-                this.CreateHandle(loop);
+                // This channel is created by TcpServerChannel
+                this.config.SetOptions(this.tcp);
+                ((TcpChannelUnsafe)this.Unsafe).ScheduleRead();
             }
-        }
-
-        internal void CreateHandle(Loop loop)
-        {
-            Debug.Assert(this.tcp == null);
-
-            this.tcp = new Tcp(loop);
-            this.config.SetOptions(this.tcp);
         }
 
         internal override unsafe IntPtr GetLoopHandle()
@@ -88,6 +75,8 @@ namespace DotNetty.Transport.Libuv
         protected override void DoBind(EndPoint localAddress)
         {
             this.tcp.Bind((IPEndPoint)localAddress);
+            // Set up tcp options right after bind where the socket is created by libuv
+            this.config.SetOptions(this.tcp);
             this.CacheLocalAddress();
         }
 
@@ -95,11 +84,21 @@ namespace DotNetty.Transport.Libuv
 
         protected override void DoClose()
         {
-            if (this.TryResetState(StateFlags.Open | StateFlags.Active))
+            try
             {
-                this.tcp?.ReadStop();
-                this.tcp?.CloseHandle();
-                this.tcp = null;
+                if (this.TryResetState(StateFlags.Open | StateFlags.Active))
+                {
+                    if (this.tcp != null)
+                    {
+                        this.tcp.ReadStop();
+                        this.tcp.CloseHandle();
+                    }
+                    this.tcp = null;
+                }
+            }
+            finally
+            {
+                base.DoClose();
             }
         }
 

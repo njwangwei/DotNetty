@@ -52,14 +52,12 @@ namespace DotNetty.Transport.Libuv
         {
             Debug.Assert(this.tcpListener == null);
 
-            var loopExecutor = (ILoopExecutor)this.EventLoop;
-            Loop loop = loopExecutor.UnsafeLoop;
-
-            this.tcpListener = new TcpListener(loop);
-            this.config.SetOptions(this.tcpListener);
-
-            var dispatcher = loopExecutor as DispatcherEventLoop;
-            dispatcher?.Register((TcpServerChannelUnsafe)this.Unsafe);
+            var loopExecutor = (LoopExecutor)this.EventLoop;
+            this.tcpListener = new TcpListener(loopExecutor.UnsafeLoop);
+            if (loopExecutor is DispatcherEventLoop dispatcher)
+            {
+                dispatcher.Register((TcpServerChannelUnsafe)this.Unsafe);
+            }
         }
 
         internal override unsafe IntPtr GetLoopHandle()
@@ -96,6 +94,8 @@ namespace DotNetty.Transport.Libuv
 
         sealed class TcpServerChannelUnsafe : NativeChannelUnsafe, IServerNativeUnsafe
         {
+            static readonly Action<object, object> AcceptCallbackAction = (u, e) => ((TcpServerChannelUnsafe)u).Accept((RemoteConnection)e);
+
             public TcpServerChannelUnsafe(TcpServerChannel channel) : base(channel)
             {
             }
@@ -114,8 +114,6 @@ namespace DotNetty.Transport.Libuv
                     ch.EventLoop.Execute(AcceptCallbackAction, this, connection);
                 }
             }
-
-            static readonly Action<object, object> AcceptCallbackAction = (u, e) => ((TcpServerChannelUnsafe)u).Accept((RemoteConnection)e);
 
             void Accept(RemoteConnection connection)
             {
@@ -144,6 +142,8 @@ namespace DotNetty.Transport.Libuv
 
                 if (ch.EventLoop is DispatcherEventLoop dispatcher)
                 {
+                    // Dispatch handle to other loops and this will call
+                    // back to accept from another loop
                     dispatcher.Dispatch(client);
                 }
                 else
@@ -152,10 +152,7 @@ namespace DotNetty.Transport.Libuv
                 }
             }
 
-            void IServerNativeUnsafe.Accept(NativeHandle handle)
-            {
-                this.Accept((Tcp)handle);
-            }
+            void IServerNativeUnsafe.Accept(NativeHandle handle) => this.Accept((Tcp)handle);
 
             void Accept(Tcp tcp)
             {
@@ -164,21 +161,18 @@ namespace DotNetty.Transport.Libuv
                 ch.Pipeline.FireChannelRead(tcpChannel);
                 ch.Pipeline.FireChannelReadComplete();
             }
+
+            void IServerNativeUnsafe.SetOptions(TcpListener tcpListener)
+            {
+                var ch = (TcpServerChannel)this.channel;
+                ch.config.SetOptions(tcpListener);
+            }
         }
 
-        protected override void DoDisconnect()
-        {
-            throw new NotSupportedException();
-        }
+        protected override void DoDisconnect() => throw new NotSupportedException($"{nameof(TcpServerChannel)}");
 
-        protected override void DoScheduleRead()
-        {
-            throw new NotSupportedException();
-        }
+        protected override void DoScheduleRead() => throw new NotSupportedException($"{nameof(TcpServerChannel)}");
 
-        protected override void DoWrite(ChannelOutboundBuffer input)
-        {
-            throw new NotSupportedException();
-        }
+        protected override void DoWrite(ChannelOutboundBuffer input) => throw new NotSupportedException($"{nameof(TcpServerChannel)}");
     }
 }

@@ -51,7 +51,7 @@ namespace DotNetty.Transport.Tests.Performance.Libuv
         [PerfSetup]
         public void SetUp(BenchmarkContext context)
         {
-            this.serverGroup = new MultithreadEventLoopGroup(_ => new EventLoop(), 1);
+            this.serverGroup = new EventLoopGroup(1);
 
             Encoding iso = Encoding.GetEncoding("ISO-8859-1");
             IByteBuffer buf = Unpooled.Buffer().WriteInt(3).WriteBytes(iso.GetBytes("ABC"));

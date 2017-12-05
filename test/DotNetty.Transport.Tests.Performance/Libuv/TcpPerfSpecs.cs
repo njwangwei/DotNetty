@@ -56,10 +56,10 @@ namespace DotNetty.Transport.Tests.Performance.Libuv
         {
             TaskScheduler.UnobservedTaskException += (sender, args) => Console.WriteLine(args.Exception);
 
-            var dispatcher = new DispatcherEventLoop();
-            this.serverGroup = new MultithreadEventLoopGroup(_ => dispatcher, 1);
+            var dispatcher = new DispatcherEventLoopGroup();
+            this.serverGroup = dispatcher;
             this.workerGroup = new WorkerEventLoopGroup(dispatcher);
-            this.clientGroup = new MultithreadEventLoopGroup(_ => new EventLoop(), 1);
+            this.clientGroup = new EventLoopGroup(1);
 
             this.message = Encoding.UTF8.GetBytes("ABC");
 
