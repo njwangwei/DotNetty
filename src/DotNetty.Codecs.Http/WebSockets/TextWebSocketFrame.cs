@@ -36,7 +36,7 @@ namespace DotNetty.Codecs.Http.WebSockets
         {
         }
 
-        public string Text() => this.Content.ToString(Encoding.UTF8);
+        public string Text => this.Content.ToString(Encoding.UTF8);
 
         public override IByteBufferHolder Replace(IByteBuffer content) => new TextWebSocketFrame(this.IsFinalFragment, this.Rsv, content);
     }
