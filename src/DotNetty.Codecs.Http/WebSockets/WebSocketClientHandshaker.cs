@@ -32,12 +32,8 @@ namespace DotNetty.Codecs.Http.WebSockets
 
         readonly int maxFramePayloadLength;
 
-        protected WebSocketClientHandshaker(
-            Uri uri,
-            WebSocketVersion version,
-            string subprotocol,
-            HttpHeaders customHeaders,
-            int maxFramePayloadLength)
+        protected WebSocketClientHandshaker(Uri uri, WebSocketVersion version, string subprotocol,
+            HttpHeaders customHeaders, int maxFramePayloadLength)
         {
             this.uri = uri;
             this.version = version;
@@ -117,7 +113,154 @@ namespace DotNetty.Codecs.Http.WebSockets
         {
             this.Verify(response);
 
-            //TODO:WIP
+            // Verify the subprotocol that we received from the server.
+            // This must be one of our expected subprotocols - or null/empty if we didn't want to speak a subprotocol
+            string receivedProtocol = null;
+            if (response.Headers.TryGet(HttpHeaderNames.SecWebsocketProtocol, out ICharSequence headerValue))
+            {
+                receivedProtocol = headerValue.ToString().Trim();
+            }
+
+            string expectedProtocol = this.expectedSubprotocol ?? "";
+            bool protocolValid = false;
+
+            if (expectedProtocol.Length == 0 && receivedProtocol == null)
+            {
+                // No subprotocol required and none received
+                protocolValid = true;
+                this.ActualSubprotocol = this.expectedSubprotocol; // null or "" - we echo what the user requested
+            }
+            else if (expectedProtocol.Length > 0 && !string.IsNullOrEmpty(receivedProtocol))
+            {
+                // We require a subprotocol and received one -> verify it
+                foreach (string protocol in expectedProtocol.Split(','))
+                {
+                    if (protocol.Trim().Equals(receivedProtocol))
+                    {
+                        protocolValid = true;
+                        this.ActualSubprotocol = receivedProtocol;
+                        break;
+                    }
+                }
+            } // else mixed cases - which are all errors
+
+            if (!protocolValid)
+            {
+                throw new WebSocketHandshakeException($"Invalid subprotocol. Actual: {receivedProtocol}. Expected one of: {this.expectedSubprotocol}");
+            }
+
+            this.SetHandshakeComplete();
+
+            IChannelPipeline p = channel.Pipeline;
+            // Remove decompressor from pipeline if its in use
+            var decompressor = p.Get<HttpContentDecompressor>();
+            if (decompressor != null)
+            {
+                p.Remove(decompressor);
+            }
+
+            // Remove aggregator if present before
+            var aggregator = p.Get<HttpObjectAggregator>();
+            if (aggregator != null)
+            {
+                p.Remove(aggregator);
+            }
+
+            IChannelHandlerContext ctx = p.Context<HttpResponseDecoder>();
+            if (ctx == null)
+            {
+                ctx = p.Context<HttpClientCodec>();
+                if (ctx == null)
+                {
+                    throw new InvalidOperationException("ChannelPipeline does not contain a HttpRequestEncoder or HttpClientCodec");
+                }
+
+                var codec = (HttpClientCodec)ctx.Handler;
+                // Remove the encoder part of the codec as the user may start writing frames after this method returns.
+                codec.RemoveOutboundHandler();
+
+                p.AddAfter(ctx.Name, "ws-decoder", this.NewWebsocketDecoder());
+
+                // Delay the removal of the decoder so the user can setup the pipeline if needed to handle
+                // WebSocketFrame messages.
+                // See https://github.com/netty/netty/issues/4533
+                channel.EventLoop.Execute(() => p.Remove(codec));
+            }
+            else
+            {
+                if (p.Get<HttpRequestEncoder>() != null)
+                {
+                    // Remove the encoder part of the codec as the user may start writing frames after this method returns.
+                    p.Remove<HttpRequestEncoder>();
+                }
+
+                IChannelHandlerContext context = ctx;
+                p.AddAfter(context.Name, "ws-decoder", this.NewWebsocketDecoder());
+
+                // Delay the removal of the decoder so the user can setup the pipeline if needed to handle
+                // WebSocketFrame messages.
+                // See https://github.com/netty/netty/issues/4533
+                channel.EventLoop.Execute(() => p.Remove(context.Handler));
+            }
+        }
+
+        public Task ProcessHandshakeAsync(IChannel channel, IHttpResponse response)
+        {
+            if (response is IFullHttpResponse res)
+            {
+                try
+                {
+                    this.FinishHandshake(channel, res);
+                    return TaskEx.Completed;
+                }
+                catch (Exception cause)
+                {
+                    return TaskEx.FromException(cause);
+                }
+            }
+            else
+            {
+                IChannelPipeline p = channel.Pipeline;
+                IChannelHandlerContext ctx = p.Context<HttpResponseDecoder>();
+                if (ctx == null)
+                {
+                    ctx = p.Context<HttpClientCodec>();
+                    if (ctx == null)
+                    {
+                        return TaskEx.FromException(new InvalidOperationException("ChannelPipeline does not contain a HttpResponseDecoder or HttpClientCodec"));
+                    }
+                }
+                // Add aggregator and ensure we feed the HttpResponse so it is aggregated. A limit of 8192 should be more
+                // then enough for the websockets handshake payload.
+                //
+                // TODO: Make handshake work without HttpObjectAggregator at all.
+                string aggregatorName = "httpAggregator";
+                p.AddAfter(ctx.Name, aggregatorName, new HttpObjectAggregator(8192));
+
+
+            }
+
+            return null;
+        }
+
+        sealed class Handshaker : SimpleChannelInboundHandler<IFullHttpResponse>
+        {
+            readonly WebSocketClientHandshaker webSocketClientHandshaker;
+            readonly IChannel channel;
+
+            public Handshaker(WebSocketClientHandshaker webSocketClientHandshaker, IChannel channel)
+            {
+                this.webSocketClientHandshaker = webSocketClientHandshaker;
+                this.channel = channel;
+            }
+
+            protected override void ChannelRead0(IChannelHandlerContext ctx, IFullHttpResponse msg)
+            {
+                // Remove and do the actual handshake
+                ctx.Channel.Pipeline.Remove(this);
+                this.webSocketClientHandshaker.FinishHandshake(this.channel, msg);
+            }
+
         }
 
         protected abstract void Verify(IFullHttpResponse response);
