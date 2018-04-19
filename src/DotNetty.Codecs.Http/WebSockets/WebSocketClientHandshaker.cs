@@ -7,6 +7,7 @@ namespace DotNetty.Codecs.Http.WebSockets
     using System;
     using System.Diagnostics.Contracts;
     using System.Threading.Tasks;
+    using DotNetty.Common.Concurrency;
     using DotNetty.Common.Utilities;
     using DotNetty.Transport.Channels;
 
@@ -63,6 +64,62 @@ namespace DotNetty.Codecs.Http.WebSockets
             private set => this.actualSubprotocol = value;
         }
 
+        public Task HandshakeAsync(IChannel channel)
+        {
+            IFullHttpRequest request = this.NewHandshakeRequest();
+
+            var decoder = channel.Pipeline.Get<HttpResponseDecoder>();
+            if (decoder == null)
+            {
+                var codec = channel.Pipeline.Get<HttpClientCodec>();
+                if (codec == null)
+                {
+                    return TaskEx.FromException(new InvalidOperationException("ChannelPipeline does not contain a HttpResponseDecoder or HttpClientCodec"));
+                }
+            }
+
+            var completion = new TaskCompletionSource();
+            channel.WriteAndFlushAsync(request).ContinueWith((t, state) =>
+                {
+                    var tcs = (TaskCompletionSource)state;
+                    switch (t.Status)
+                    {
+                        case TaskStatus.RanToCompletion:
+                            IChannelPipeline p = channel.Pipeline;
+                            IChannelHandlerContext ctx = p.Context<HttpRequestEncoder>() ?? p.Context<HttpClientCodec>();
+                            if (ctx == null)
+                            {
+                                tcs.TrySetException(new InvalidOperationException("ChannelPipeline does not contain a HttpRequestEncoder or HttpClientCodec"));
+                                return;
+                            }
+
+                            p.AddAfter(ctx.Name, "ws-encoder", this.NewWebSocketEncoder());
+                            tcs.TryComplete();
+                            break;
+                        case TaskStatus.Canceled:
+                            tcs.TrySetCanceled();
+                            break;
+                        case TaskStatus.Faulted:
+                            tcs.TryUnwrap(t.Exception);
+                            break;
+                        default:
+                            throw new ArgumentOutOfRangeException();
+                    }
+                },
+                completion);
+
+            return completion.Task;
+        }
+
+        protected abstract IFullHttpRequest NewHandshakeRequest();
+
+        public void FinishHandshake(IChannel channel, IFullHttpResponse response)
+        {
+            this.Verify(response);
+
+            //TODO:WIP
+        }
+
         protected abstract void Verify(IFullHttpResponse response);
 
         protected abstract IWebSocketFrameDecoder NewWebsocketDecoder();
@@ -86,6 +143,7 @@ namespace DotNetty.Codecs.Http.WebSockets
 
             return string.IsNullOrEmpty(path) ? "/" : path;
         }
+
         static string WebsocketHostValue(Uri wsUrl)
         {
             int port = wsUrl.Port;
