@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 // ReSharper disable ConvertToAutoProperty
+// ReSharper disable ConvertToAutoPropertyWhenPossible
 namespace DotNetty.Codecs.Http.WebSockets
 {
     using System;
@@ -13,10 +14,10 @@ namespace DotNetty.Codecs.Http.WebSockets
 
     public abstract class WebSocketClientHandshaker
     {
-        static readonly ClosedChannelException CLOSED_CHANNEL_EXCEPTION = new ClosedChannelException();
+        static readonly ClosedChannelException DefaultClosedChannelException = new ClosedChannelException();
 
-        static readonly string HTTP_SCHEME_PREFIX = HttpScheme.Http + "://";
-        static readonly string HTTPS_SCHEME_PREFIX = HttpScheme.Https + "://";
+        static readonly string HttpSchemePrefix = HttpScheme.Http + "://";
+        static readonly string HttpsSchemePrefix = HttpScheme.Https + "://";
 
         readonly Uri uri;
 
@@ -28,7 +29,7 @@ namespace DotNetty.Codecs.Http.WebSockets
 
         volatile string actualSubprotocol;
 
-        protected readonly HttpHeaders customHeaders;
+        protected readonly HttpHeaders CustomHeaders;
 
         readonly int maxFramePayloadLength;
 
@@ -38,7 +39,7 @@ namespace DotNetty.Codecs.Http.WebSockets
             this.uri = uri;
             this.version = version;
             this.expectedSubprotocol = subprotocol;
-            this.customHeaders = customHeaders;
+            this.CustomHeaders = customHeaders;
             this.maxFramePayloadLength = maxFramePayloadLength;
         }
 
@@ -206,16 +207,17 @@ namespace DotNetty.Codecs.Http.WebSockets
 
         public Task ProcessHandshakeAsync(IChannel channel, IHttpResponse response)
         {
+            var completionSource = new TaskCompletionSource();
             if (response is IFullHttpResponse res)
             {
                 try
                 {
                     this.FinishHandshake(channel, res);
-                    return TaskEx.Completed;
+                    completionSource.TryComplete();
                 }
                 catch (Exception cause)
                 {
-                    return TaskEx.FromException(cause);
+                    completionSource.TrySetException(cause);
                 }
             }
             else
@@ -227,40 +229,73 @@ namespace DotNetty.Codecs.Http.WebSockets
                     ctx = p.Context<HttpClientCodec>();
                     if (ctx == null)
                     {
-                        return TaskEx.FromException(new InvalidOperationException("ChannelPipeline does not contain a HttpResponseDecoder or HttpClientCodec"));
+                        completionSource.TrySetException(new InvalidOperationException("ChannelPipeline does not contain a HttpResponseDecoder or HttpClientCodec"));
                     }
                 }
-                // Add aggregator and ensure we feed the HttpResponse so it is aggregated. A limit of 8192 should be more
-                // then enough for the websockets handshake payload.
-                //
-                // TODO: Make handshake work without HttpObjectAggregator at all.
-                string aggregatorName = "httpAggregator";
-                p.AddAfter(ctx.Name, aggregatorName, new HttpObjectAggregator(8192));
-
-
+                else
+                {
+                    // Add aggregator and ensure we feed the HttpResponse so it is aggregated. A limit of 8192 should be more
+                    // then enough for the websockets handshake payload.
+                    //
+                    // TODO: Make handshake work without HttpObjectAggregator at all.
+                    const string AggregatorName = "httpAggregator";
+                    p.AddAfter(ctx.Name, AggregatorName, new HttpObjectAggregator(8192));
+                    p.AddAfter(AggregatorName, "handshaker", new Handshaker(this, channel, completionSource));
+                    try
+                    {
+                        ctx.FireChannelRead(ReferenceCountUtil.Retain(response));
+                    }
+                    catch (Exception cause)
+                    {
+                        completionSource.TrySetException(cause);
+                    }
+                }
             }
 
-            return null;
+            return completionSource.Task;
         }
 
         sealed class Handshaker : SimpleChannelInboundHandler<IFullHttpResponse>
         {
-            readonly WebSocketClientHandshaker webSocketClientHandshaker;
+            readonly WebSocketClientHandshaker clientHandshaker;
             readonly IChannel channel;
+            readonly TaskCompletionSource completion;
 
-            public Handshaker(WebSocketClientHandshaker webSocketClientHandshaker, IChannel channel)
+            public Handshaker(WebSocketClientHandshaker clientHandshaker, IChannel channel, TaskCompletionSource completion)
             {
-                this.webSocketClientHandshaker = webSocketClientHandshaker;
+                this.clientHandshaker = clientHandshaker;
                 this.channel = channel;
+                this.completion = completion;
             }
 
             protected override void ChannelRead0(IChannelHandlerContext ctx, IFullHttpResponse msg)
             {
                 // Remove and do the actual handshake
                 ctx.Channel.Pipeline.Remove(this);
-                this.webSocketClientHandshaker.FinishHandshake(this.channel, msg);
+                try
+                {
+                    this.clientHandshaker.FinishHandshake(this.channel, msg);
+                    this.completion.TryComplete();
+                }
+                catch (Exception cause)
+                {
+                    this.completion.TrySetException(cause);
+                }
             }
 
+            public override void ExceptionCaught(IChannelHandlerContext ctx, Exception cause)
+            {
+                // Remove ourself and fail the handshake promise.
+                ctx.Channel.Pipeline.Remove(this);
+                this.completion.TrySetException(cause);
+            }
+
+            public override void ChannelInactive(IChannelHandlerContext ctx)
+            {
+                // Fail promise if Channel was closed
+                this.completion.TrySetException(DefaultClosedChannelException);
+                ctx.FireChannelInactive();
+            }
         }
 
         protected abstract void Verify(IFullHttpResponse response);
@@ -275,7 +310,7 @@ namespace DotNetty.Codecs.Http.WebSockets
             return channel.WriteAndFlushAsync(frame);
         }
 
-        static string RawPath(Uri wsUrl)
+        internal static string RawPath(Uri wsUrl)
         {
             string path = wsUrl.AbsolutePath;
             string query = wsUrl.Query;
@@ -287,7 +322,7 @@ namespace DotNetty.Codecs.Http.WebSockets
             return string.IsNullOrEmpty(path) ? "/" : path;
         }
 
-        static string WebsocketHostValue(Uri wsUrl)
+        internal static string WebsocketHostValue(Uri wsUrl)
         {
             int port = wsUrl.Port;
             if (port == -1)
@@ -313,7 +348,7 @@ namespace DotNetty.Codecs.Http.WebSockets
             return NetUtil.ToSocketAddressString(host, port);
         }
 
-        static string WebsocketOriginValue(Uri wsUrl)
+        internal static string WebsocketOriginValue(Uri wsUrl)
         {
             string scheme = wsUrl.Scheme;
             string schemePrefix;
@@ -325,12 +360,12 @@ namespace DotNetty.Codecs.Http.WebSockets
                 || (scheme == null && port == WebSocketScheme.WSS.Port))
             {
 
-                schemePrefix = HTTPS_SCHEME_PREFIX;
+                schemePrefix = HttpsSchemePrefix;
                 defaultPort = WebSocketScheme.WSS.Port;
             }
             else
             {
-                schemePrefix = HTTP_SCHEME_PREFIX;
+                schemePrefix = HttpSchemePrefix;
                 defaultPort = WebSocketScheme.WS.Port;
             }
 

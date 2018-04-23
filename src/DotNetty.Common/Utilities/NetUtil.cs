@@ -4,6 +4,7 @@
 namespace DotNetty.Common.Utilities
 {
     using System;
+    using System.Runtime.CompilerServices;
     using System.Text;
 
     public static class NetUtil
@@ -220,25 +221,28 @@ namespace DotNetty.Common.Utilities
 
             if (len == 3)
             {
-                return (c1 = word[from + 1]) >= '0' &&
-                    (c2 = word[from + 2]) >= '0' &&
-                    (c0 <= '1' && c1 <= '9' && c2 <= '9' ||
-                        c0 == '2' && c1 <= '5' && (c2 <= '5' || c1 < '5' && c2 <= '9'));
+                return (c1 = word[from + 1]) >= '0' 
+                    && (c2 = word[from + 2]) >= '0' 
+                    && (c0 <= '1' && c1 <= '9' && c2 <= '9' 
+                        || c0 == '2' && c1 <= '5' && (c2 <= '5' || c1 < '5' && c2 <= '9'));
             }
 
             return c0 <= '9' && (len == 1 || IsValidNumericChar(word[from + 1]));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static bool IsValidHexChar(char c)
         {
             return c >= '0' && c <= '9' || c >= 'A' && c <= 'F' || c >= 'a' && c <= 'f';
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static bool IsValidNumericChar(char c)
         {
             return c >= '0' && c <= '9';
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static bool IsValidIPv4MappedChar(char c)
         {
             return c == 'f' || c == 'F';
