@@ -4,12 +4,14 @@
 namespace DotNetty.Codecs.Http.WebSockets
 {
     using System;
+    using System.Runtime.CompilerServices;
     using DotNetty.Buffers;
+    using DotNetty.Common.Internal;
     using DotNetty.Common.Utilities;
 
     public class WebSocketClientHandshaker00 : WebSocketClientHandshaker
     {
-        static readonly AsciiString WEBSOCKET = AsciiString.Cached("WebSocket");
+        static readonly AsciiString Websocket = AsciiString.Cached("WebSocket");
 
         IByteBuffer expectedChallengeResponseBytes;
 
@@ -19,7 +21,7 @@ namespace DotNetty.Codecs.Http.WebSockets
         {
         }
 
-        protected override IFullHttpRequest NewHandshakeRequest()
+        protected override unsafe IFullHttpRequest NewHandshakeRequest()
         {
             // Make keys
             int spaces1 = WebSocketUtil.RandomNumber(1, 12);
@@ -37,12 +39,81 @@ namespace DotNetty.Codecs.Http.WebSockets
             string key1 = Convert.ToString(product1);
             string key2 = Convert.ToString(product2);
 
-            throw new NotImplementedException();
+            key1 = InsertRandomCharacters(key1);
+            key2 = InsertRandomCharacters(key2);
+
+            key1 = InsertSpaces(key1, spaces1);
+            key2 = InsertSpaces(key2, spaces2);
+
+            byte[] key3 = WebSocketUtil.RandomBytes(8);
+            var challenge = new byte[16];
+            fixed (byte* bytes = challenge)
+            {
+                Unsafe.WriteUnaligned(bytes, number1);
+                Unsafe.WriteUnaligned(bytes + 4, number2);
+                PlatformDependent.CopyMemory(key3, 0, bytes + 8, 8);
+            }
+
+            this.expectedChallengeResponseBytes = Unpooled.WrappedBuffer(WebSocketUtil.Md5(challenge));
+
+            // Get path
+            Uri wsUrl = this.Uri;
+            string path = RawPath(wsUrl);
+
+            // Format request
+            var request = new DefaultFullHttpRequest(HttpVersion.Http11, HttpMethod.Get, path);
+            HttpHeaders headers = request.Headers;
+            headers.Add(HttpHeaderNames.Upgrade, Websocket)
+                .Add(HttpHeaderNames.Connection, HttpHeaderValues.Upgrade)
+                .Add(HttpHeaderNames.Host, WebsocketHostValue(wsUrl))
+                .Add(HttpHeaderNames.Origin, WebsocketOriginValue(wsUrl))
+                .Add(HttpHeaderNames.SecWebsocketKey1, key1)
+                .Add(HttpHeaderNames.SecWebsocketKey2, key2);
+
+            string expectedSubprotocol = this.ExpectedSubprotocol;
+            if (string.IsNullOrEmpty(expectedSubprotocol))
+            {
+                headers.Add(HttpHeaderNames.SecWebsocketProtocol, expectedSubprotocol);
+            }
+
+            if (this.CustomHeaders != null)
+            {
+                headers.Add(this.CustomHeaders);
+            }
+
+            // Set Content-Length to workaround some known defect.
+            // See also: http://www.ietf.org/mail-archive/web/hybi/current/msg02149.html
+            headers.Set(HttpHeaderNames.ContentLength, key3.Length);
+            request.Content.WriteBytes(key3);
+            return request;
         }
 
         protected override void Verify(IFullHttpResponse response)
         {
-            throw new NotImplementedException();
+            if (!response.Status.Equals(HttpResponseStatus.SwitchingProtocols))
+            {
+                throw new WebSocketHandshakeException($"Invalid handshake response getStatus: {response.Status}");
+            }
+
+            HttpHeaders headers = response.Headers;
+
+            if (!headers.TryGet(HttpHeaderNames.Upgrade, out ICharSequence upgrade) 
+                ||!Websocket.ContentEqualsIgnoreCase(upgrade))
+            {
+                throw new WebSocketHandshakeException($"Invalid handshake response upgrade: {upgrade}");
+            }
+
+            if (!headers.ContainsValue(HttpHeaderNames.Connection, HttpHeaderValues.Upgrade, true))
+            {
+                headers.TryGet(HttpHeaderNames.Connection, out upgrade);
+                throw new WebSocketHandshakeException($"Invalid handshake response connection: {upgrade}");
+            }
+
+            IByteBuffer challenge = response.Content;
+            if (!challenge.Equals(this.expectedChallengeResponseBytes))
+            {
+                throw new WebSocketHandshakeException("Invalid challenge");
+            }
         }
 
         static string InsertRandomCharacters(string key)
