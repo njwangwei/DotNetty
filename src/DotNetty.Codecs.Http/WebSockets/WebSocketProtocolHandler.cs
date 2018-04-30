@@ -7,7 +7,7 @@ namespace DotNetty.Codecs.Http.WebSockets
     using System.Collections.Generic;
     using DotNetty.Transport.Channels;
 
-    abstract class WebSocketProtocolHandler : MessageToMessageDecoder<WebSocketFrame>
+    public abstract class WebSocketProtocolHandler : MessageToMessageDecoder<WebSocketFrame>
     {
         protected override void Decode(IChannelHandlerContext ctx, WebSocketFrame frame, List<object> output)
         {
