@@ -63,7 +63,8 @@ namespace DotNetty.Transport.Libuv.Native
     [StructLayout(LayoutKind.Sequential)]
     struct uv_buf_t
     {
-        static readonly bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        static readonly int Size = IntPtr.Size;
 
         /*
            Windows 
@@ -80,9 +81,25 @@ namespace DotNetty.Transport.Libuv.Native
         readonly IntPtr second;
         // ReSharper restore PrivateFieldCanBeConvertedToLocalVariable
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static unsafe void InitMemory(IntPtr buf, IntPtr memory, int length)
+        {
+            var len = (IntPtr)length;
+            if (IsWindows)
+            {
+                *(IntPtr*)buf = len;
+                *(IntPtr*)(buf + Size) = memory;
+            }
+            else
+            {
+                *(IntPtr*)buf = memory;
+                *(IntPtr*)(buf + Size) = len;
+            }
+        }
+
         internal uv_buf_t(IntPtr memory, int length)
         {
-            if (isWindows)
+            if (IsWindows)
             {
                 this.first = (IntPtr)length;
                 this.second = memory;
@@ -284,7 +301,7 @@ namespace DotNetty.Transport.Libuv.Native
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate void uv_work_cb(IntPtr watcher);
 
-    static class NativeMethods
+    static unsafe class NativeMethods
     {
         const string LibraryName = "libuv";
 
@@ -305,8 +322,7 @@ namespace DotNetty.Transport.Libuv.Native
                     result = uv_ip6_addr(ip, endPoint.Port, out addr);
                     break;
                 default:
-                    throw new NotSupportedException(
-                        $"End point {endPoint} is not supported, expecting InterNetwork/InterNetworkV6.");
+                    throw new NotSupportedException($"End point {endPoint} is not supported, expecting InterNetwork/InterNetworkV6.");
             }
             ThrowIfError(result);
         }
@@ -338,6 +354,32 @@ namespace DotNetty.Transport.Libuv.Native
             return sockaddr.GetIPEndPoint();
         }
 
+#if NETSTANDARD1_3
+        internal static IntPtr Allocate(int size) => Marshal.AllocCoTaskMem(size);
+
+        internal static void FreeMemory(IntPtr ptr) => Marshal.FreeCoTaskMem(ptr);
+#else
+        internal static IntPtr Allocate(int size) => Marshal.AllocHGlobal(size);
+
+        internal static void FreeMemory(IntPtr ptr) => Marshal.FreeHGlobal(ptr);
+#endif
+
+        internal static IntPtr Allocate(uv_handle_type handleType)
+        {
+            int size = GetSize(handleType);
+            return Allocate(size);
+        }
+
+        internal static int GetSize(uv_handle_type handleType) => uv_handle_size(handleType).ToInt32();
+
+        internal static IntPtr Allocate(uv_req_type requestType, int size = 0)
+        {
+            size += GetSize(requestType);
+            return Allocate(size);
+        }
+
+        internal static int GetSize(uv_req_type requestType) => uv_req_size(requestType).ToInt32();
+
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uv_listen(IntPtr handle, int backlog, uv_watcher_cb connection_cb);
 
@@ -363,7 +405,7 @@ namespace DotNetty.Transport.Libuv.Native
         internal static extern int uv_read_stop(IntPtr handle);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int uv_write(IntPtr req, IntPtr handle, uv_buf_t[] bufs, int nbufs, uv_watcher_cb cb);
+        internal static extern int uv_write(IntPtr req, IntPtr handle, uv_buf_t* bufs, int nbufs, uv_watcher_cb cb);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int uv_write2(IntPtr req, IntPtr handle, uv_buf_t[] bufs, int nbufs, IntPtr sendHandle, uv_watcher_cb cb);
@@ -524,6 +566,9 @@ namespace DotNetty.Transport.Libuv.Native
         [MethodImpl(MethodImplOptions.NoInlining)]
         internal static void ThrowOperationException(uv_err_code error) => throw CreateError(error);
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static void ThrowObjectDisposedException(string message) => throw new ObjectDisposedException(message);
+
         internal static OperationException CreateError(uv_err_code error)
         {
             IntPtr ptr = uv_err_name(error);
@@ -534,9 +579,6 @@ namespace DotNetty.Transport.Libuv.Native
 
             return new OperationException((int)error, name, description);
         }
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        internal static void ThrowObjectDisposedException(string message) => throw new ObjectDisposedException(message);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         static extern IntPtr uv_strerror(uv_err_code err);

@@ -10,6 +10,7 @@ namespace DotNetty.Transport.Libuv
     using System.Diagnostics.Contracts;
     using System.Threading.Tasks;
     using DotNetty.Common.Concurrency;
+    using DotNetty.Common.Utilities;
     using DotNetty.Transport.Channels;
     using DotNetty.Transport.Libuv.Native;
 
@@ -26,18 +27,18 @@ namespace DotNetty.Transport.Libuv
             string name = parent.PipeName;
             if (string.IsNullOrEmpty(name))
             {
-                throw new ArgumentException("Pipe name is required for worker loops", nameof(parent));
+                throw new ArgumentException("Pipe name is required for worker event loop", nameof(parent));
             }
 
             this.pipeName = name;
             this.connectCompletion = new TaskCompletionSource();
+            this.Start();
         }
 
-        internal Task StartAsync()
-        {
-            this.Start();
-            return this.connectCompletion.Task;
-        }
+        /// <summary>
+        /// Awaitable for connecting to the dispatcher pipe.
+        /// </summary>
+        internal Task ConnectTask => this.connectCompletion.Task;
 
         protected override void Initialize()
         {
@@ -53,7 +54,7 @@ namespace DotNetty.Transport.Libuv
             {
                 Logger.Warn($"{nameof(WorkerEventLoop)} failed to create connect request to dispatcher", exception);
                 request?.Dispose();
-                this.connectCompletion.TrySetException(exception);
+                this.connectCompletion.TryUnwrap(exception);
             }
         }
 
@@ -66,7 +67,7 @@ namespace DotNetty.Transport.Libuv
                 if (request.Error != null)
                 {
                     Logger.Warn($"{nameof(WorkerEventLoop)} failed to connect to dispatcher", request.Error);
-                    this.connectCompletion.TrySetException(request.Error);
+                    this.connectCompletion.TryUnwrap(request.Error);
                 }
                 else
                 {

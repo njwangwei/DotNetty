@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 // ReSharper disable ConvertToAutoPropertyWhenPossible
+// ReSharper disable ConvertToAutoProperty
 #pragma warning disable 420
 namespace DotNetty.Transport.Libuv
 {
@@ -17,11 +18,11 @@ namespace DotNetty.Transport.Libuv
     using DotNetty.Common;
     using DotNetty.Transport.Libuv.Native;
 
-    using Timer = DotNetty.Transport.Libuv.Native.Timer;
+    using Timer = Native.Timer;
 
     class LoopExecutor : AbstractScheduledEventExecutor
     {
-        const int DefaultBreakoutTime = 100;
+        const int DefaultBreakoutTime = 100; //ms
         static readonly TimeSpan DefaultBreakoutInterval = TimeSpan.FromMilliseconds(DefaultBreakoutTime);
 
         protected static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<LoopExecutor>();
@@ -32,20 +33,23 @@ namespace DotNetty.Transport.Libuv
         const int ShutdownState = 4;
         const int TerminatedState = 5;
 
-        readonly PreciseTimeSpan preciseBreakoutInterval;
+        readonly ThreadLocalPool<WriteRequest> writeRequestPool = new ThreadLocalPool<WriteRequest>(handle => new WriteRequest(handle));
+        readonly long preciseBreakoutInterval;
         readonly IQueue<IRunnable> taskQueue;
         readonly XThread thread;
         readonly TaskScheduler scheduler;
+        readonly ManualResetEventSlim loopRunStart;
         readonly TaskCompletionSource terminationCompletionSource;
         readonly Loop loop;
         readonly Async asyncHandle;
         readonly Timer timerHandle;
+
         volatile int executionState = NotStartedState;
 
-        PreciseTimeSpan lastExecutionTime;
-        PreciseTimeSpan gracefulShutdownStartTime;
-        PreciseTimeSpan gracefulShutdownQuietPeriod;
-        PreciseTimeSpan gracefulShutdownTimeout;
+        long lastExecutionTime;
+        long gracefulShutdownStartTime;
+        long gracefulShutdownQuietPeriod;
+        long gracefulShutdownTimeout;
 
         // Flag to indicate whether async handle should be used to wake up 
         // the loop, only accessed when InEventLoop is true
@@ -63,23 +67,26 @@ namespace DotNetty.Transport.Libuv
 
         public LoopExecutor(IEventLoopGroup parent, string threadName, TimeSpan breakoutInterval) : base(parent)
         {
-            this.preciseBreakoutInterval = PreciseTimeSpan.FromTimeSpan(breakoutInterval);
+            this.preciseBreakoutInterval = (long)breakoutInterval.TotalMilliseconds;
             this.terminationCompletionSource = new TaskCompletionSource();
             this.taskQueue = PlatformDependent.NewMpscQueue<IRunnable>();
             this.scheduler = new ExecutorTaskScheduler(this);
 
             this.loop = new Loop();
-            this.asyncHandle = new Async(this.loop, OnAsync, this);
-            this.timerHandle = new Timer(this.loop, OnTimer, this);
-            string name = $"{nameof(LoopExecutor)}:{this.loop.Handle}";
+            this.asyncHandle = new Async(this.loop, OnCallback, this);
+            this.timerHandle = new Timer(this.loop, OnCallback, this);
+            string name = $"{this.GetType().Name}:{this.loop.Handle}";
             if (!string.IsNullOrEmpty(threadName))
             {
                 name = $"{name}({threadName})";
             }
             this.thread = new XThread(Run) { Name = name };
+            this.loopRunStart = new ManualResetEventSlim(false, 1);
         }
 
-        protected internal void Start()
+        internal ThreadLocalPool<WriteRequest> WriteRequestPool => this.writeRequestPool;
+
+        protected void Start()
         {
             if (this.executionState > NotStartedState)
             {
@@ -94,19 +101,19 @@ namespace DotNetty.Transport.Libuv
 
         static void Run(object state)
         {
-            var executor = (LoopExecutor)state;
-            executor.SetCurrentExecutor(executor);
+            var loopExecutor = (LoopExecutor)state;
+            loopExecutor.SetCurrentExecutor(loopExecutor);
 
-            Task.Factory.StartNew(() => 
-                executor.RunLoop(),
+            Task.Factory.StartNew(
+                executor => ((LoopExecutor)executor).StartLoop(), state,
                 CancellationToken.None,
-                TaskCreationOptions.None,
-                executor.scheduler);
+                TaskCreationOptions.AttachedToParent,
+                loopExecutor.scheduler);
         }
 
-        static void OnAsync(object state) => ((LoopExecutor)state).OnAsync();
+        static void OnCallback(object state) => ((LoopExecutor)state).OnCallback();
 
-        void OnAsync()
+        void OnCallback()
         {
             if (this.IsShuttingDown)
             {
@@ -117,8 +124,6 @@ namespace DotNetty.Transport.Libuv
                 this.RunAllTasks(this.preciseBreakoutInterval);
             }
         }
-
-        static void OnTimer(object state) => ((LoopExecutor)state).WakeUp(true);
 
         /// <summary>
         /// Called before run the loop in the loop thread.
@@ -136,70 +141,88 @@ namespace DotNetty.Transport.Libuv
             // NOOP
         }
 
-        void RunLoop()
+        internal void WaitForLoopRun(TimeSpan timeout) => this.loopRunStart.Wait(timeout);
+
+        void StartLoop()
         {
             IntPtr handle = this.loop.Handle;
             try
             {
-                this.Initialize();
-                Interlocked.CompareExchange(ref this.executionState, StartedState, NotStartedState);
-                this.timerHandle.RemoveReference(); // Timer should not keep the loop open
                 this.UpdateLastExecutionTime();
+                this.Initialize();
+                if (Interlocked.CompareExchange(ref this.executionState, StartedState, NotStartedState) != NotStartedState)
+                {
+                    throw new InvalidOperationException($"Invalid {nameof(LoopExecutor)} state {this.executionState}");
+                }
+                this.loopRunStart.Set();
                 this.loop.Run(uv_run_mode.UV_RUN_DEFAULT);
-                Logger.Info("Loop {}:{} run default finished.", this.thread.Name, handle);
-                this.CleanupAndTerminate();
             }
             catch (Exception ex)
             {
+                this.loopRunStart.Set();
                 Logger.Error("Loop {}:{} run default error.", this.thread.Name, handle, ex);
-                this.executionState = TerminatedState;
                 this.terminationCompletionSource.TrySetException(ex);
             }
+            finally
+            {
+                Logger.Info("Loop {}:{} thread finished.", this.thread.Name, handle);
+                this.CleanupAndTerminate();
+            }
         }
+
+        void StopLoop()
+        {
+            try
+            {
+                // Drop out from the loop so that it can be safely disposed,
+                // other active handles will be closed by loop.Close()
+                this.timerHandle.Stop();
+                this.loop.Stop();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("{}: shutting down loop error", ex);
+            }
+        }
+
         void ShuttingDown()
         {
             Debug.Assert(this.InEventLoop);
 
             this.CancelScheduledTasks();
 
-            if (this.gracefulShutdownStartTime == PreciseTimeSpan.Zero)
+            if (this.gracefulShutdownStartTime == 0)
             {
-                this.gracefulShutdownStartTime = PreciseTimeSpan.FromStart;
+                this.gracefulShutdownStartTime = this.GetLoopTime();
             }
 
-            bool immediate = this.gracefulShutdownQuietPeriod == PreciseTimeSpan.Zero;
-            if (this.RunAllTasks())
+            bool runTask;
+            do
             {
-                if (!immediate)
+                runTask = this.RunAllTasks();
+
+                // Terminate if the quiet period is 0.
+                if (this.gracefulShutdownQuietPeriod == 0)
                 {
-                    this.WakeUp(true);
+                    this.StopLoop();
                     return;
                 }
             }
+            while (runTask);
 
-            if (!immediate)
-            {
-                PreciseTimeSpan nanoTime = PreciseTimeSpan.FromStart;
-                if (nanoTime - this.gracefulShutdownStartTime <= this.gracefulShutdownTimeout 
-                    && nanoTime - this.lastExecutionTime <= this.gracefulShutdownQuietPeriod)
-                {
-                    this.timerHandle.Start(100, 0); // Wait for 100ms
-                    return;
-                }
-            }
+            long nanoTime = this.GetLoopTime();
 
-            try
+            // Shutdown timed out
+            if (nanoTime - this.gracefulShutdownStartTime <= this.gracefulShutdownTimeout
+                && nanoTime - this.lastExecutionTime <= this.gracefulShutdownQuietPeriod)
             {
-                // Drop out from the loop so that it can be safely disposed,
-                // other active handles will be closed by loop.Close()
-                if (this.loop.IsAlive)
-                {
-                    this.loop.Stop();
-                }
+                // Wait for quiet period passed
+                this.timerHandle.Start(DefaultBreakoutTime, 0); // 100ms
             }
-            catch (Exception ex)
+            else
             {
-                Logger.Error("{}: shutting down loop error", ex);
+                // No tasks were added for last quiet period
+                this.StopLoop();
             }
         }
 
@@ -230,38 +253,50 @@ namespace DotNetty.Transport.Libuv
             }
             catch (Exception ex)
             {
-                Logger.Warn("Loop {}:{} release error {}", this.thread.Name, handle, ex);
+                Logger.Warn("{}:{} release error {}", this.thread.Name, handle, ex);
             }
 
+            SafeDispose(this.timerHandle);
+            SafeDispose(this.asyncHandle);
+            SafeDispose(this.loop);
+            Logger.Info("{}:{} disposed.", this.thread.Name, handle);
+        }
+
+        static void SafeDispose(IDisposable handle)
+        {
             try
             {
-                this.timerHandle.Stop();
-                this.asyncHandle.RemoveReference();
-                this.loop.Dispose();
-                Logger.Info("Loop {}:{} disposed.", this.thread.Name, handle);
+                Logger.Info("Disposing {}", handle.GetType());
+                handle.Dispose();
             }
             catch (Exception ex)
             {
-                Logger.Warn("Loop {}:{} dispose error {}", this.thread.Name, handle, ex);
+                Logger.Warn("{} dispose error {}", handle.GetType(), ex);
             }
         }
 
-        protected void UpdateLastExecutionTime() => this.lastExecutionTime = PreciseTimeSpan.FromStart;
+        void UpdateLastExecutionTime() => this.lastExecutionTime = this.GetLoopTime();
 
-        void RunAllTasks(PreciseTimeSpan timeout)
+        long GetLoopTime()
         {
-            this.wakeUp = false;
+            this.loop.UpdateTime();
+            return this.loop.Now;
+        }
+
+        void RunAllTasks(long timeout)
+        {
             this.FetchFromScheduledTaskQueue();
             IRunnable task = this.PollTask();
             if (task == null)
             {
-                this.wakeUp = true;
+                this.AfterRunningAllTasks();
                 return;
             }
 
-            PreciseTimeSpan deadline = PreciseTimeSpan.Deadline(timeout);
+            long start = this.GetLoopTime();
             long runTasks = 0;
-            PreciseTimeSpan executionTime;
+            long executionTime;
+            this.wakeUp = false;
             for (;;)
             {
                 SafeExecute(task);
@@ -272,8 +307,8 @@ namespace DotNetty.Transport.Libuv
                 // XXX: Hard-coded value - will make it configurable if it is really a problem.
                 if ((runTasks & 0x3F) == 0)
                 {
-                    executionTime = PreciseTimeSpan.FromStart;
-                    if (executionTime >= deadline)
+                    executionTime = this.GetLoopTime();
+                    if ((executionTime - start) >= timeout)
                     {
                         break;
                     }
@@ -282,42 +317,42 @@ namespace DotNetty.Transport.Libuv
                 task = this.PollTask();
                 if (task == null)
                 {
-                    executionTime = PreciseTimeSpan.FromStart;
+                    executionTime = this.GetLoopTime();
                     break;
                 }
             }
             this.wakeUp = true;
+
+            this.AfterRunningAllTasks();
             this.lastExecutionTime = executionTime;
+        }
 
-            if (this.taskQueue.IsEmpty)
+        void AfterRunningAllTasks()
+        {
+            if (this.IsShuttingDown)
             {
-                long nextTimeout = this.loop.GetBackendTimeout();
+                // Immediate shutdown
+                this.WakeUp(true);
+                return;
+            }
 
-                // This means the loop will block, ensure any scheduled
-                // task will break out.
-                if (nextTimeout == -1)
-                {
-                    IScheduledRunnable nextScheduledTask = this.ScheduledTaskQueue.Peek();
-                    if (nextScheduledTask != null)
-                    {
-                        PreciseTimeSpan wakeUpTimeout = nextScheduledTask.Deadline - PreciseTimeSpan.FromStart;
-                        if (wakeUpTimeout.Ticks > 0)
-                        {
-                            nextTimeout = (long)wakeUpTimeout.ToTimeSpan().TotalMilliseconds;
-                            // The loop time must be updated because run all tasks in this
-                            // iteration potentially takes a while.
-                            this.loop.UpdateTime();
-                            this.timerHandle.Start(nextTimeout, 0);
-                        }
-                    }
-                }
-                // No need to stop the timer because the timer callback
-                // happens exactly once, e.g. repeat = 0
+            long nextTimeout = DefaultBreakoutTime;
+            if (!this.taskQueue.IsEmpty)
+            {
+                this.timerHandle.Start(nextTimeout, 0);
             }
             else
             {
-                // Left over tasks, schedule the timer to continue
-                this.timerHandle.Start(DefaultBreakoutTime, 0);
+                IScheduledRunnable nextScheduledTask = this.ScheduledTaskQueue.Peek();
+                if (nextScheduledTask != null)
+                {
+                    PreciseTimeSpan wakeUpTimeout = nextScheduledTask.Deadline - PreciseTimeSpan.FromStart;
+                    if (wakeUpTimeout.Ticks > 0)
+                    {
+                        nextTimeout = (long)wakeUpTimeout.ToTimeSpan().TotalMilliseconds;
+                    }
+                    this.timerHandle.Start(nextTimeout, 0);
+                }
             }
         }
 
@@ -338,7 +373,7 @@ namespace DotNetty.Transport.Libuv
             return true;
         }
 
-        IRunnable PollTask() => !this.IsShuttingDown ? PollTaskFrom(this.taskQueue) : null;
+        IRunnable PollTask() => PollTaskFrom(this.taskQueue);
 
         bool RunAllTasks()
         {
@@ -355,7 +390,7 @@ namespace DotNetty.Transport.Libuv
             while (!fetchedAll); // keep on processing until we fetched all scheduled tasks.
             if (ranAtLeastOne)
             {
-                this.lastExecutionTime = PreciseTimeSpan.FromStart;
+                this.lastExecutionTime = this.GetLoopTime();
             }
             return ranAtLeastOne;
         }
@@ -381,9 +416,9 @@ namespace DotNetty.Transport.Libuv
         static IRunnable PollTaskFrom(IQueue<IRunnable> taskQueue) =>
             taskQueue.TryDequeue(out IRunnable task) ? task : null;
 
-        public override bool IsShuttingDown => this.executionState >= ShuttingDownState;
-
         public override Task TerminationCompletion => this.terminationCompletionSource.Task;
+
+        public override bool IsShuttingDown => this.executionState >= ShuttingDownState;
 
         public override bool IsShutdown => this.executionState >= ShutdownState;
 
@@ -396,8 +431,7 @@ namespace DotNetty.Transport.Libuv
             // If the executor is not in the event loop, wake up the loop by async handle immediately.
             //
             // If the executor is in the event loop and in the middle of RunAllTasks, no need to 
-            // wake up the loop again. Otherwise, this is called by libuv thread and the loop has
-            // queued tasks to process later by RunAllTasks.
+            // wake up the loop again because this is normally called by the current running task.
             if (!inEventLoop || this.wakeUp)
             {
                 this.asyncHandle.Send();
@@ -448,8 +482,12 @@ namespace DotNetty.Transport.Libuv
                 return this.TerminationCompletion;
             }
 
+            // In case of Shutdown called before the loop run
+            this.loopRunStart.Wait();
+
             bool inEventLoop = this.InEventLoop;
             bool wakeUpLoop;
+            int oldState;
             for (;;)
             {
                 if (this.IsShuttingDown)
@@ -458,7 +496,7 @@ namespace DotNetty.Transport.Libuv
                 }
                 int newState;
                 wakeUpLoop = true;
-                int oldState = this.executionState;
+                oldState = this.executionState;
                 if (inEventLoop)
                 {
                     newState = ShuttingDownState;
@@ -483,13 +521,13 @@ namespace DotNetty.Transport.Libuv
                 }
             }
 
-            this.gracefulShutdownQuietPeriod = PreciseTimeSpan.FromTimeSpan(quietPeriod);
-            this.gracefulShutdownTimeout = PreciseTimeSpan.FromTimeSpan(timeout);
+            this.gracefulShutdownQuietPeriod = (long)quietPeriod.TotalMilliseconds;
+            this.gracefulShutdownTimeout = (long)timeout.TotalMilliseconds;
 
-            if (this.executionState == NotStartedState)
+            if (oldState == NotStartedState)
             {
-                // If the loop is not yet running, close all handles directly
-                // because wake up callback will not be executed.
+                // If the loop is not yet running (e.g. Initialize failed) close all 
+                // handles directly because wake up callback will not be executed. 
                 this.CleanupAndTerminate();
             }
             else

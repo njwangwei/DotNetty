@@ -46,10 +46,7 @@ namespace DotNetty.Transport.Libuv.Native
             NativeMethods.ThrowIfError(result);
         }
 
-        void OnReadCallback(int status)
-        {
-            this.readCallback(this, status);
-        }
+        void OnReadCallback(int status) => this.readCallback(this, status);
 
         internal Tcp GetPendingHandle()
         {

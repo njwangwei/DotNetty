@@ -4,6 +4,7 @@
 namespace DotNetty.Transport.Libuv
 {
     using System;
+    using System.Diagnostics;
     using System.Net;
     using System.Threading.Tasks;
     using DotNetty.Buffers;
@@ -15,7 +16,7 @@ namespace DotNetty.Transport.Libuv
 
     public abstract class NativeChannel : AbstractChannel
     {
-        static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<NativeChannel>();
+        protected static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<NativeChannel>();
 
         [Flags]
         protected enum StateFlags
@@ -26,8 +27,11 @@ namespace DotNetty.Transport.Libuv
             Active = 1 << 3
         }
 
+        internal bool ReadPending;
         volatile StateFlags state;
+
         TaskCompletionSource connectPromise;
+        IScheduledTask connectCancellationTask;
 
         protected NativeChannel(IChannel parent) : base(parent)
         {
@@ -83,11 +87,7 @@ namespace DotNetty.Transport.Libuv
             }
         }
 
-        void DoFinishConnect()
-        {
-            this.OnConnected();
-            this.Pipeline.FireChannelActive();
-        }
+        void DoFinishConnect() => this.OnConnected();
 
         protected override void DoClose()
         {
@@ -99,16 +99,29 @@ namespace DotNetty.Transport.Libuv
             }
         }
 
-        protected void OnConnected()
+        protected virtual void OnConnected()
         {
             this.SetState(StateFlags.Active);
             this.CacheLocalAddress();
             this.CacheRemoteAddress();
         }
 
-        protected abstract void DoScheduleRead();
+        protected abstract void DoStopRead();
 
-        internal abstract IntPtr GetLoopHandle();
+        internal abstract NativeHandle GetHandle();
+
+        internal interface INativeUnsafe
+        {
+            IntPtr UnsafeHandle { get; }
+
+            void FinishConnect(ConnectRequest request);
+
+            uv_buf_t PrepareRead(ReadOperation readOperation);
+
+            void FinishRead(ReadOperation readOperation);
+
+            void FinishWrite(int bytesWritten, OperationException error);
+        }
 
         protected abstract class NativeChannelUnsafe : AbstractUnsafe, INativeUnsafe
         {
@@ -132,6 +145,15 @@ namespace DotNetty.Transport.Libuv
                     }
 
                     ch.connectPromise = new TaskCompletionSource(remoteAddress);
+
+                    // Schedule connect timeout.
+                    TimeSpan connectTimeout = ch.Configuration.ConnectTimeout;
+                    if (connectTimeout > TimeSpan.Zero)
+                    {
+                        ch.connectCancellationTask = ch.EventLoop
+                            .Schedule(CancelConnect, ch, remoteAddress, connectTimeout);
+                    }
+
                     ch.DoConnect(remoteAddress, localAddress);
                     return ch.connectPromise.Task;
                 }
@@ -142,94 +164,146 @@ namespace DotNetty.Transport.Libuv
                 }
             }
 
-            // Callback from libuv connect request in libuv thread
+            static void CancelConnect(object context, object state)
+            {
+                var ch = (NativeChannel)context;
+                var address = (IPEndPoint)state;
+                TaskCompletionSource promise = ch.connectPromise;
+                var cause = new ConnectTimeoutException($"connection timed out: {address}");
+                if (promise != null && promise.TrySetException(cause))
+                {
+                    ((NativeChannelUnsafe)ch.Unsafe).CloseSafe();
+                }
+            }
+
+            // Connect request callback from libuv thread
             void INativeUnsafe.FinishConnect(ConnectRequest request)
             {
                 var ch = (NativeChannel)this.channel;
+                ch.connectCancellationTask?.Cancel();
+
                 TaskCompletionSource promise = ch.connectPromise;
+                bool success = false;
                 try
                 {
-                    if (request.Error != null)
+                    if (promise != null) // Not cancelled from timed out
                     {
-                        promise.TrySetException(request.Error);
-                        this.CloseIfClosed();
+                        OperationException error = request.Error;
+                        if (error != null)
+                        {
+                            if (error.ErrorCode == ErrorCode.ETIMEDOUT)
+                            {
+                                // Connection timed out should use the standard ConnectTimeoutException
+                                promise.TrySetException(new ConnectTimeoutException(error.ToString()));
+                            }
+                            else
+                            {
+                                promise.TrySetException(new ChannelException(error));
+                            }
+                        }
+                        else
+                        {
+                            bool wasActive = ch.Active;
+                            ch.DoFinishConnect();
+                            success = promise.TryComplete();
+
+                            // Regardless if the connection attempt was cancelled, channelActive() 
+                            // event should be triggered, because what happened is what happened.
+                            if (!wasActive && ch.Active)
+                            {
+                                ch.Pipeline.FireChannelActive();
+                            }
+                        }
                     }
-                    else
-                    {
-                        ch.DoFinishConnect();
-                        promise.TryComplete();
-                    }
-                }
-                catch (Exception exception)
-                {
-                    promise.TrySetException(exception);
-                    this.CloseIfClosed();
                 }
                 finally
                 {
                     request.Dispose();
                     ch.connectPromise = null;
+                    if (!success)
+                    {
+                        this.CloseSafe();
+                    }
                 }
             }
 
             public abstract IntPtr UnsafeHandle { get; }
 
-            // Callback from libuv allocate in libuv thread
-            ReadOperation INativeUnsafe.PrepareRead()
+            // Allocate callback from libuv thread
+            uv_buf_t INativeUnsafe.PrepareRead(ReadOperation readOperation)
             {
+                Debug.Assert(readOperation != null);
+
                 var ch = (NativeChannel)this.channel;
                 IChannelConfiguration config = ch.Configuration;
                 IByteBufferAllocator allocator = config.Allocator;
 
                 IRecvByteBufAllocatorHandle allocHandle = this.RecvBufAllocHandle;
-                allocHandle.Reset(config);
                 IByteBuffer buffer = allocHandle.Allocate(allocator);
                 allocHandle.AttemptedBytesRead = buffer.WritableBytes;
 
-                return new ReadOperation(this, buffer);
+                return readOperation.GetBuffer(buffer);
             }
 
-            // Callback from libuv read in libuv thread
+            // Read callback from libuv thread
             void INativeUnsafe.FinishRead(ReadOperation operation)
             {
                 var ch = (NativeChannel)this.channel;
+                IChannelConfiguration config = ch.Configuration;
                 IChannelPipeline pipeline = ch.Pipeline;
-                Exception error = operation.Error;
+                OperationException error = operation.Error;
 
                 bool close = error != null || operation.EndOfStream;
                 IRecvByteBufAllocatorHandle allocHandle = this.RecvBufAllocHandle;
+                allocHandle.Reset(config);
+
                 IByteBuffer buffer = operation.Buffer;
+                Debug.Assert(buffer != null);
+
                 allocHandle.LastBytesRead = operation.Status;
                 if (allocHandle.LastBytesRead <= 0)
                 {
                     // nothing was read -> release the buffer.
-                    buffer.SafeRelease();
+                    buffer.Release();
                 }
                 else
                 {
                     buffer.SetWriterIndex(buffer.WriterIndex + operation.Status);
                     allocHandle.IncMessagesRead(1);
+
+                    ch.ReadPending = false;
                     pipeline.FireChannelRead(buffer);
                 }
 
                 allocHandle.ReadComplete();
                 pipeline.FireChannelReadComplete();
 
-                if (error != null)
-                {
-                    pipeline.FireExceptionCaught(error);
-                }
                 if (close)
                 {
-                    this.SafeClose();
+                    if (error != null)
+                    {
+                        pipeline.FireExceptionCaught(new ChannelException(error));
+                    }
+                    this.CloseSafe();
+                }
+                else
+                {
+                    // If read is called from channel read or read complete
+                    // do not stop reading
+                    if (!ch.ReadPending && !config.AutoRead)
+                    {
+                        ch.DoStopRead();
+                    }
                 }
             }
 
-            async void SafeClose()
+            internal void CloseSafe() => CloseSafe(this.channel, this.channel.CloseAsync());
+
+            internal static async void CloseSafe(object channelObject, Task closeTask)
             {
                 try
                 {
-                    await this.CloseAsync();
+                    await closeTask;
                 }
                 catch (TaskCanceledException)
                 {
@@ -238,63 +312,49 @@ namespace DotNetty.Transport.Libuv
                 {
                     if (Logger.DebugEnabled)
                     {
-                        Logger.Debug($"Failed to close channel {this.channel} cleanly.", ex);
+                        Logger.Debug($"Failed to close channel {channelObject} cleanly.", ex);
                     }
                 }
             }
 
-            // Callback from libuv write request in libuv thread
-            void INativeUnsafe.FinishWrite(WriteRequest writeRequest)
-            {
-                try
-                {
-                    if (writeRequest.Error != null)
-                    {
-                        ChannelOutboundBuffer input = this.OutboundBuffer;
-                        input?.FailFlushed(writeRequest.Error, true);
-                        this.channel.Pipeline.FireExceptionCaught(writeRequest.Error);
-                    }
-                }
-                finally
-                {
-                    writeRequest.Release();
-                }
-            }
-
-            internal void ScheduleRead()
+            protected sealed override void Flush0()
             {
                 var ch = (NativeChannel)this.channel;
-                if (ch.EventLoop.InEventLoop)
+                if (!ch.IsInState(StateFlags.WriteScheduled))
                 {
-                    ch.DoScheduleRead();
-                }
-                else
-                {
-                    ch.EventLoop.Execute(p => ((NativeChannel)p).DoScheduleRead(), ch);
+                    base.Flush0();
                 }
             }
+
+            // Write request callback from libuv thread
+            void INativeUnsafe.FinishWrite(int bytesWritten, OperationException error)
+            {
+                var ch = (NativeChannel)this.channel;
+                bool resetWritePending = ch.TryResetState(StateFlags.WriteScheduled);
+                Debug.Assert(resetWritePending);
+
+                try
+                {
+                    ChannelOutboundBuffer input = this.OutboundBuffer;
+                    if (error != null)
+                    {
+                        input.FailFlushed(error, true);
+                        CloseSafe(ch, this.CloseAsync(new ChannelException("Failed to write", error), false));
+                    }
+                    else
+                    {
+                        if (bytesWritten > 0)
+                        {
+                            input.RemoveBytes(bytesWritten);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CloseSafe(ch, this.CloseAsync(new ClosedChannelException("Failed to write", ex), false));
+                }
+                this.Flush0();
+            }
         }
-    }
-
-    interface INativeUnsafe
-    {
-        IntPtr UnsafeHandle { get; }
-
-        void FinishConnect(ConnectRequest request);
-
-        ReadOperation PrepareRead();
-
-        void FinishRead(ReadOperation readOperation);
-
-        void FinishWrite(WriteRequest writeRequest);
-    }
-    
-    interface IServerNativeUnsafe
-    {
-        void SetOptions(TcpListener tcpListener);
-
-        void Accept(RemoteConnection connection);
-
-        void Accept(NativeHandle handle);
     }
 }

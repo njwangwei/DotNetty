@@ -3,7 +3,6 @@
 
 namespace DotNetty.Codecs.Protobuf.Tests
 {
-    using System;
     using System.Collections.Generic;
     using DotNetty.Buffers;
     using DotNetty.Transport.Channels.Embedded;
@@ -13,7 +12,7 @@ namespace DotNetty.Codecs.Protobuf.Tests
 
     public class RoundTripTests
     {
-        static IEnumerable<object[]> GetAddressBookCases()
+        public static IEnumerable<object[]> GetAddressBookCases()
         {
             var person = new Person
             {
@@ -208,7 +207,7 @@ namespace DotNetty.Codecs.Protobuf.Tests
             IByteBuffer inputBuffer;
             if (isCompositeBuffer)
             {
-                inputBuffer = new CompositeByteBuffer(UnpooledByteBufferAllocator.Default, 2,
+                inputBuffer = Unpooled.WrappedBuffer(
                     Unpooled.CopiedBuffer(data, 0, 2),
                     Unpooled.CopiedBuffer(data, 2, data.Length - 2));
             }
@@ -274,7 +273,7 @@ namespace DotNetty.Codecs.Protobuf.Tests
             IByteBuffer inputBuffer;
             if (isCompositeBuffer)
             {
-                inputBuffer = new CompositeByteBuffer(UnpooledByteBufferAllocator.Default, 2,
+                inputBuffer = Unpooled.WrappedBuffer(
                     Unpooled.CopiedBuffer(data, 0, 2),
                     Unpooled.CopiedBuffer(data, 2, data.Length - 2));
             }

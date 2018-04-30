@@ -10,11 +10,14 @@ namespace DotNetty.Transport.Libuv.Tests
     using DotNetty.Transport.Channels;
     using Xunit;
 
+    using static TestUtil;
+
+    [Collection(LibuvTransport)]
     public class CloseForciblyTests : IDisposable
     {
-        static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
-
         readonly IEventLoopGroup group;
+        IChannel serverChannel;
+        IChannel clientChannel;
 
         public CloseForciblyTests()
         {
@@ -30,33 +33,30 @@ namespace DotNetty.Transport.Libuv.Tests
             Bootstrap cb = new Bootstrap()
                 .Group(this.group)
                 .Channel<TcpChannel>();
-            CloseForcibly(sb, cb);
+            this.CloseForcibly0(sb, cb);
         }
 
-        static void CloseForcibly(ServerBootstrap sb, Bootstrap cb)
+        void CloseForcibly0(ServerBootstrap sb, Bootstrap cb)
         {
             sb.Handler(new InboundHandler())
               .ChildHandler(new ChannelHandlerAdapter());
             cb.Handler(new ChannelHandlerAdapter());
 
-            var address = new IPEndPoint(IPAddress.Loopback, 0);
-
             // start server
-            Task<IChannel> server = sb.BindAsync(address);
-            Assert.True(server.Wait(DefaultTimeout));
-            IChannel sc = server.Result;
-            Assert.NotNull(sc.LocalAddress);
-            var endPoint = (IPEndPoint)sc.LocalAddress;
+            Task<IChannel> task = sb.BindAsync(LoopbackAnyPort);
+            Assert.True(task.Wait(DefaultTimeout), "Server bind timed out");
+            this.serverChannel = task.Result;
+            Assert.NotNull(this.serverChannel.LocalAddress);
+            var endPoint = (IPEndPoint)this.serverChannel.LocalAddress;
 
             // connect to server
-            Task<IChannel> client = cb.ConnectAsync(endPoint);
-            Assert.True(client.Wait(DefaultTimeout));
-            IChannel channel = client.Result;
-            Assert.NotNull(channel.LocalAddress);
-            Assert.Equal(endPoint, channel.RemoteAddress);
-            channel.CloseAsync().Wait(DefaultTimeout);
+            task = cb.ConnectAsync(endPoint);
+            Assert.True(task.Wait(DefaultTimeout), "Connect to server timed out");
+            this.clientChannel = task.Result;
+            Assert.NotNull(this.clientChannel.LocalAddress);
+            this.clientChannel.CloseAsync().Wait(DefaultTimeout);
 
-            sc.CloseAsync().Wait(DefaultTimeout);
+            this.serverChannel.CloseAsync().Wait(DefaultTimeout);
         }
 
         sealed class InboundHandler : ChannelHandlerAdapter
@@ -70,6 +70,8 @@ namespace DotNetty.Transport.Libuv.Tests
 
         public void Dispose()
         {
+            this.clientChannel?.CloseAsync().Wait(DefaultTimeout);
+            this.serverChannel?.CloseAsync().Wait(DefaultTimeout);
             this.group.ShutdownGracefullyAsync(TimeSpan.Zero, TimeSpan.Zero).Wait(DefaultTimeout);
         }
     }

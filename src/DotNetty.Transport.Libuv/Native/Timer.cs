@@ -20,23 +20,17 @@ namespace DotNetty.Transport.Libuv.Native
             Debug.Assert(loop != null);
             Debug.Assert(callback != null);
 
-            int size = NativeMethods.uv_handle_size(uv_handle_type.UV_TIMER).ToInt32();
-            IntPtr handle = Marshal.AllocHGlobal(size);
+            IntPtr handle = NativeMethods.Allocate(uv_handle_type.UV_TIMER);
 
-            int result;
             try
             {
-                result = NativeMethods.uv_timer_init(loop.Handle, handle);
+                int result = NativeMethods.uv_timer_init(loop.Handle, handle);
+                NativeMethods.ThrowIfError(result);
             }
             catch
             {
-                Marshal.FreeHGlobal(handle);
+                NativeMethods.FreeMemory(handle);
                 throw;
-            }
-            if (result < 0)
-            {
-                Marshal.FreeHGlobal(handle);
-                NativeMethods.ThrowOperationException((uv_err_code)result);
             }
 
             GCHandle gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);

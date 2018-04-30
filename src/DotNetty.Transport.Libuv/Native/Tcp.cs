@@ -6,31 +6,28 @@ namespace DotNetty.Transport.Libuv.Native
     using System;
     using System.Diagnostics;
     using System.Net;
-    using DotNetty.Buffers;
-    using DotNetty.Common.Internal;
 
     sealed class Tcp : TcpHandle
     {
         static readonly uv_alloc_cb AllocateCallback = OnAllocateCallback;
         static readonly uv_read_cb ReadCallback = OnReadCallback;
 
-        INativeUnsafe unsafeChannel;
-        readonly ILinkedQueue<ReadOperation> pendingReads;
+        readonly ReadOperation pendingRead;
+        NativeChannel.INativeUnsafe nativeUnsafe;
 
-        public Tcp(Loop loop) : base(loop)
+        public Tcp(Loop loop, uint flags = 0 /* AF_UNSPEC */ ) : base(loop, flags)
         {
-            this.pendingReads = PlatformDependent.NewSpscLinkedQueue<ReadOperation>();
+            this.pendingRead = new ReadOperation();
         }
 
-        public void ReadStart(INativeUnsafe channel)
+        public void ReadStart(NativeChannel.INativeUnsafe channel)
         {
             Debug.Assert(channel != null);
 
             this.Validate();
             int result = NativeMethods.uv_read_start(this.Handle, AllocateCallback, ReadCallback);
             NativeMethods.ThrowIfError(result);
-
-            this.unsafeChannel = channel;
+            this.nativeUnsafe = channel;
         }
 
         public void ReadStop()
@@ -41,8 +38,24 @@ namespace DotNetty.Transport.Libuv.Native
             }
 
             // This function is idempotent and may be safely called on a stopped stream.
-            int result = NativeMethods.uv_read_stop(this.Handle);
-            NativeMethods.ThrowIfError(result);
+            NativeMethods.uv_read_stop(this.Handle);
+        }
+
+        void OnReadCallback(int statusCode, OperationException error)
+        {
+            try
+            {
+                this.pendingRead.Complete(statusCode, error);
+                this.nativeUnsafe.FinishRead(this.pendingRead);
+            }
+            catch (Exception exception)
+            {
+                Logger.Warn($"Tcp {this.Handle} read callbcak error.", exception);
+            }
+            finally
+            {
+                this.pendingRead.Reset();
+            }
         }
 
         static void OnReadCallback(IntPtr handle, IntPtr nread, ref uv_buf_t buf)
@@ -56,74 +69,20 @@ namespace DotNetty.Transport.Libuv.Native
                 error = NativeMethods.CreateError((uv_err_code)status);
             }
 
-            ReadOperation operation = tcp.pendingReads.Poll();
-            if (operation == null)
-            {
-                if (error == null)
-                {
-                    Logger.Warn($"Tcp {tcp.Handle} read operation completed prematurely.");
-                    return;
-                }
-
-                // It is possible if the client connection resets  
-                // causing errors where there are no pending read
-                // operations, in this case we just notify the channel
-                // for errors
-                operation = new ReadOperation(tcp.unsafeChannel, Unpooled.Empty);
-            }
-
-            try
-            {
-                operation.Complete(status, error);
-            }
-            catch (Exception exception)
-            {
-                Logger.Warn($"Tcp {tcp.Handle} read callbcak failed.", exception);
-            }
-        }
-
-        public void Write(WriteRequest request)
-        {
-            this.Validate();
-            try
-            {
-                int result = NativeMethods.uv_write(
-                    request.Handle,
-                    this.Handle,
-                    request.Bufs,
-                    request.BufferCount,
-                    WriteRequest.WriteCallback);
-                NativeMethods.ThrowIfError(result);
-            }
-            catch
-            {
-                request.Release();
-                throw;
-            }
+            tcp.OnReadCallback(status, error);
         }
 
         protected override void OnClosed()
         {
             base.OnClosed();
 
-            while (true)
-            {
-                ReadOperation operation = this.pendingReads.Poll();
-                if (operation == null)
-                {
-                    break;
-                }
-
-                operation.Dispose();
-            }
-            this.unsafeChannel = null;
+            this.pendingRead.Dispose();
+            this.nativeUnsafe = null;
         }
 
         void OnAllocateCallback(out uv_buf_t buf)
         {
-            ReadOperation operation = this.unsafeChannel.PrepareRead();
-            this.pendingReads.Offer(operation);
-            buf = operation.GetBuffer();
+            buf = this.nativeUnsafe.PrepareRead(this.pendingRead);
         }
 
         static void OnAllocateCallback(IntPtr handle, IntPtr suggestedSize, out uv_buf_t buf)

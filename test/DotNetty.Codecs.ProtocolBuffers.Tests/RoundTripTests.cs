@@ -13,7 +13,7 @@ namespace DotNetty.Codecs.ProtocolBuffers.Tests
 
     public class RoundTripTests
     {
-        static IEnumerable<object[]> GetAddressBookCases()
+        public static IEnumerable<object[]> GetAddressBookCases()
         {
             Person.Builder personBuilder = Person.CreateBuilder();
             personBuilder.SetId(1);
@@ -118,7 +118,7 @@ namespace DotNetty.Codecs.ProtocolBuffers.Tests
             IByteBuffer inputBuffer;
             if (isCompositeBuffer)
             {
-                inputBuffer = new CompositeByteBuffer(UnpooledByteBufferAllocator.Default, 2,
+                inputBuffer = Unpooled.WrappedBuffer(
                     Unpooled.CopiedBuffer(data, 0, 2),
                     Unpooled.CopiedBuffer(data, 2, data.Length - 2));
             }
@@ -186,7 +186,7 @@ namespace DotNetty.Codecs.ProtocolBuffers.Tests
             IByteBuffer inputBuffer;
             if (isCompositeBuffer)
             {
-                inputBuffer = new CompositeByteBuffer(UnpooledByteBufferAllocator.Default, 2,
+                inputBuffer = Unpooled.WrappedBuffer(
                     Unpooled.CopiedBuffer(data, 0, 2),
                     Unpooled.CopiedBuffer(data, 2, data.Length - 2));
             }

@@ -18,23 +18,16 @@ namespace DotNetty.Transport.Libuv.Native
 
         public Loop()
         {
-            int size = NativeMethods.uv_loop_size().ToInt32();
-            IntPtr loopHandle = Marshal.AllocHGlobal(size);
-
-            int result;
+            IntPtr loopHandle = NativeMethods.Allocate(NativeMethods.uv_loop_size().ToInt32());
             try
             {
-                result = NativeMethods.uv_loop_init(loopHandle);
+                int result = NativeMethods.uv_loop_init(loopHandle);
+                NativeMethods.ThrowIfError(result);
             }
             catch
             {
-                Marshal.FreeHGlobal(loopHandle);
+                NativeMethods.FreeMemory(loopHandle);
                 throw;
-            }
-            if (result < 0)
-            {
-                Marshal.FreeHGlobal(loopHandle);
-                NativeMethods.ThrowOperationException((uv_err_code)result);
             }
 
             GCHandle gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
@@ -104,7 +97,7 @@ namespace DotNetty.Transport.Libuv.Native
         {
             if (this.handle == IntPtr.Zero)
             {
-                NativeMethods.ThrowObjectDisposedException($"Loop has already been disposed {this.GetType()} ");
+                NativeMethods.ThrowObjectDisposedException($"{this.GetType()}");
             }
         }
 
@@ -131,45 +124,33 @@ namespace DotNetty.Transport.Libuv.Native
             // Get gc handle before close loop
             IntPtr pHandle = ((uv_loop_t*)handle)->data;
 
-            // Close loop
-            try
+            // Fully close the loop, similar to 
+            //https://github.com/libuv/libuv/blob/v1.x/test/task.h#L190
+
+            int count = 0;
+            while (true)
             {
-                int retry = 0;
-                while (retry < 10)
+                Logger.Debug($"Loop {handle} walking handles, count = {count}.");
+                NativeMethods.uv_walk(handle, WalkCallback, handle);
+
+                Logger.Debug($"Loop {handle} running default to call close callbacks, count = {count}.");
+                NativeMethods.uv_run(handle, uv_run_mode.UV_RUN_DEFAULT);
+
+                int result = NativeMethods.uv_loop_close(handle);
+                Logger.Debug($"Loop {handle} close result = {result}, count = {count}.");
+                if (result == 0)
                 {
-                    // Force close all active handles before close the loop
-                    NativeMethods.uv_walk(handle, WalkCallback, handle);
-                    Logger.Debug($"Loop {handle} walk all handles completed.");
+                    break;
+                }
 
-                    // Loop.Run here actually blocks in some intensive situitions 
-                    // and it is highly unpredictable. For now, we rely on the users 
-                    // to do the right things before disposing the loop, 
-                    // e.g. close all handles before calling this.
-                    // NativeMethods.RunLoop(handle, uv_run_mode.UV_RUN_DEFAULT);
-                    int result = NativeMethods.uv_loop_close(handle);
-                    if (result >= 0)
-                    {
-                        break;
-                    }
-                    else
-                    {
-                        OperationException error = NativeMethods.CreateError((uv_err_code)result);
-                        // Only retry if loop close return busy
-                        if (error.Name != "EBUSY")
-                        {
-                            throw error;
-                        }
-                    }
-
-                    retry++;
+                count++;
+                if (count >= 20)
+                {
+                    Logger.Warn($"Loop {handle} close all handles limit 20 times exceeded.");
+                    break;
                 }
             }
-            catch (Exception exception)
-            {
-                Logger.Warn($"Loop {handle} error attempt to run loop once before closing. {exception}");
-            }
-
-            Logger.Info($"Loop {handle} closed.");
+            Logger.Info($"Loop {handle} closed, count = {count}.");
 
             // Free GCHandle
             if (pHandle != IntPtr.Zero)
@@ -184,7 +165,7 @@ namespace DotNetty.Transport.Libuv.Native
             }
 
             // Release memory
-            Marshal.FreeHGlobal(handle);
+            NativeMethods.FreeMemory(handle);
             Logger.Info($"Loop {handle} memory released.");
         }
 
@@ -200,7 +181,7 @@ namespace DotNetty.Transport.Libuv.Native
                 // All handles must implement IDisposable
                 var target = NativeHandle.GetTarget<IDisposable>(handle);
                 target?.Dispose();
-                Logger.Info($"Loop {loopHandle} walk callback disposed {handle} {target?.GetType()}");
+                Logger.Debug($"Loop {loopHandle} walk callback disposed {handle} {target?.GetType()}");
             }
             catch (Exception exception)
             {

@@ -11,27 +11,28 @@ namespace DotNetty.Transport.Libuv.Native
 
     abstract unsafe class TcpHandle : NativeHandle
     {
-        protected TcpHandle(Loop loop) : base(uv_handle_type.UV_TCP)
+        protected TcpHandle(Loop loop, uint flags) : base(uv_handle_type.UV_TCP)
         {
             Debug.Assert(loop != null);
 
-            int size = NativeMethods.uv_handle_size(uv_handle_type.UV_TCP).ToInt32();
-            IntPtr handle = Marshal.AllocHGlobal(size);
+            IntPtr handle = NativeMethods.Allocate(uv_handle_type.UV_TCP);
 
-            int result;
             try
             {
-                result = NativeMethods.uv_tcp_init(loop.Handle, handle);
+                // if flags is specified as AF_INET or AF_INET6, Libuv 
+                // creates the socket when tcp handle is created.
+                // Otherwise the socket is created when bind to an address.
+                //  
+                // This is for TcpListener to create socket early before bind
+                int result = flags == 0 
+                    ? NativeMethods.uv_tcp_init(loop.Handle, handle) 
+                    : NativeMethods.uv_tcp_init_ex(loop.Handle, handle, flags);
+                NativeMethods.ThrowIfError(result);
             }
             catch
             {
-                Marshal.FreeHGlobal(handle);
+                NativeMethods.FreeMemory(handle);
                 throw;
-            }
-            if (result < 0)
-            {
-                Marshal.FreeHGlobal(handle);
-                NativeMethods.ThrowOperationException((uv_err_code)result);
             }
 
             GCHandle gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
@@ -55,10 +56,10 @@ namespace DotNetty.Transport.Libuv.Native
             return NativeMethods.TcpGetSocketName(this.Handle);
         }
 
-        public void NoDelay(bool value)
+        public void NoDelay(int value)
         {
             this.Validate();
-            int result = NativeMethods.uv_tcp_nodelay(this.Handle, value ? 1 : 0);
+            int result = NativeMethods.uv_tcp_nodelay(this.Handle, value);
             NativeMethods.ThrowIfError(result);
         }
 
@@ -68,7 +69,10 @@ namespace DotNetty.Transport.Libuv.Native
 
             this.Validate();
             var size = (IntPtr)value;
-            return NativeMethods.uv_send_buffer_size(this.Handle, ref size);
+            int result = NativeMethods.uv_send_buffer_size(this.Handle, ref size);
+            NativeMethods.ThrowIfError(result);
+
+            return size.ToInt32();
         }
 
         public int ReceiveBufferSize(int value)
@@ -77,13 +81,17 @@ namespace DotNetty.Transport.Libuv.Native
 
             this.Validate();
             var size = (IntPtr)value;
-            return NativeMethods.uv_recv_buffer_size(this.Handle, ref size);
+
+            int result = NativeMethods.uv_recv_buffer_size(this.Handle, ref size);
+            NativeMethods.ThrowIfError(result);
+
+            return size.ToInt32();
         }
 
-        public void KeepAlive(bool value, int delay)
+        public void KeepAlive(int value, int delay)
         {
             this.Validate();
-            int result = NativeMethods.uv_tcp_keepalive(this.Handle, value ? 1 : 0, delay);
+            int result = NativeMethods.uv_tcp_keepalive(this.Handle, value, delay);
             NativeMethods.ThrowIfError(result);
         }
 

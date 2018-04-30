@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+// ReSharper disable ForCanBeConvertedToForeach
 namespace DotNetty.Transport.Libuv
 {
     using System;
@@ -9,6 +10,7 @@ namespace DotNetty.Transport.Libuv
     using System.Threading.Tasks;
     using DotNetty.Common.Concurrency;
     using DotNetty.Transport.Channels;
+    using DotNetty.Transport.Libuv.Native;
 
     public sealed class EventLoopGroup : IEventLoopGroup
     {
@@ -30,7 +32,7 @@ namespace DotNetty.Transport.Libuv
                 bool success = false;
                 try
                 {
-                    eventLoop = new EventLoop(this, $"{nameof(EventLoopGroup)}:{i}");
+                    eventLoop = new EventLoop(this, $"{nameof(EventLoopGroup)}-{i}");
                     success = true;
                 }
                 catch (Exception ex)
@@ -62,18 +64,19 @@ namespace DotNetty.Transport.Libuv
         {
             // Attempt to select event loop based on thread first
             int threadId = XThread.CurrentThread.Id;
-            foreach (EventLoop loop in this.eventLoops)
+            int i;
+            for (i = 0; i < this.eventLoops.Length; i++)
             {
-                if (loop.LoopThreadId == threadId)
+                if (this.eventLoops[i].LoopThreadId == threadId)
                 {
-                    return loop;
+                    return this.eventLoops[i];
                 }
             }
 
             // Default select, this means libuv handles not created yet,
             // the chosen loop will be used to create handles from.
-            int id = Interlocked.Increment(ref this.requestId);
-            return this.eventLoops[Math.Abs(id % this.eventLoops.Length)];
+            i = Interlocked.Increment(ref this.requestId);
+            return this.eventLoops[Math.Abs(i % this.eventLoops.Length)];
         }
 
         public Task RegisterAsync(IChannel channel)
@@ -85,12 +88,13 @@ namespace DotNetty.Transport.Libuv
 
             // The handle loop must be the same as the loop of the
             // handle was created from.
-            IntPtr loopHandle = nativeChannel.GetLoopHandle();
-            foreach (EventLoop loop in this.eventLoops)
+            NativeHandle handle = nativeChannel.GetHandle();
+            IntPtr loopHandle = handle.LoopHandle();
+            for (int i = 0; i < this.eventLoops.Length; i++)
             {
-                if (loop.UnsafeLoop.Handle == loopHandle)
+                if (this.eventLoops[i].UnsafeLoop.Handle == loopHandle)
                 {
-                    return loop.RegisterAsync(nativeChannel);
+                    return this.eventLoops[i].RegisterAsync(nativeChannel);
                 }
             }
 

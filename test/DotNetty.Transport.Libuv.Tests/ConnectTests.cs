@@ -12,26 +12,25 @@ namespace DotNetty.Transport.Libuv.Tests
     using DotNetty.Transport.Libuv.Native;
     using Xunit;
 
+    using static TestUtil;
+
+    [Collection(LibuvTransport)]
     public sealed class ConnectTests : IDisposable
     {
-        static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
-
-        readonly IEventLoopGroup serverGroup;
-        readonly IEventLoopGroup clientGroup;
+        readonly IEventLoopGroup group;
+        IChannel serverChannel;
+        IChannel clientChannel;
 
         public ConnectTests()
         {
-            this.serverGroup = new EventLoopGroup(1);
-            this.clientGroup = new EventLoopGroup(1);
+            this.group = new EventLoopGroup(1);
         }
 
         [Fact]
         public void Connect()
         {
-            var address = new IPEndPoint(IPAddress.IPv6Loopback, 0);
-
             ServerBootstrap sb = new ServerBootstrap()
-                .Group(this.serverGroup)
+                .Group(this.group)
                 .Channel<TcpServerChannel>()
                 .ChildHandler(new ActionChannelInitializer<TcpChannel>(channel =>
                 {
@@ -39,7 +38,7 @@ namespace DotNetty.Transport.Libuv.Tests
                 }));
 
             Bootstrap cb = new Bootstrap()
-                .Group(this.clientGroup)
+                .Group(this.group)
                 .Channel<TcpChannel>()
                 .Handler(new ActionChannelInitializer<TcpChannel>(channel =>
                 {
@@ -47,60 +46,60 @@ namespace DotNetty.Transport.Libuv.Tests
                 }));
 
             // start server
-            Task<IChannel> server = sb.BindAsync(address);
-            Assert.True(server.Wait(DefaultTimeout));
-            IChannel serverChannel = server.Result;
-            Assert.NotNull(serverChannel.LocalAddress);
-            var endPoint = (IPEndPoint)serverChannel.LocalAddress;
+            Task<IChannel> task = sb.BindAsync(LoopbackAnyPort);
+            Assert.True(task.Wait(DefaultTimeout), "Server bind timed out");
+            this.serverChannel = task.Result;
+            Assert.NotNull(this.serverChannel.LocalAddress);
+            var endPoint = (IPEndPoint)this.serverChannel.LocalAddress;
 
             // connect to server
-            Task<IChannel> client = cb.ConnectAsync(endPoint);
-            Assert.True(client.Wait(DefaultTimeout));
-            IChannel clientChannel = client.Result;
-            Assert.NotNull(clientChannel.LocalAddress);
-            Assert.Equal(endPoint, clientChannel.RemoteAddress);
+            task = cb.ConnectAsync(endPoint);
+            Assert.True(task.Wait(DefaultTimeout), "Connect to server timed out");
+            this.clientChannel = task.Result;
+            Assert.NotNull(this.clientChannel.LocalAddress);
         }
 
         [Fact]
         public void MultipleConnect()
         {
-            var address = new IPEndPoint(IPAddress.IPv6Loopback, 0);
             ServerBootstrap sb = new ServerBootstrap()
-                .Group(this.serverGroup)
+                .Group(this.group)
                 .Channel<TcpServerChannel>()
                 .ChildHandler(new ChannelHandlerAdapter());
 
+            var address = new IPEndPoint(IPAddress.IPv6Loopback, 0);
             // start server
-            Task<IChannel> server = sb.BindAsync(address);
-            Assert.True(server.Wait(DefaultTimeout));
-            IChannel serverChannel = server.Result;
-            Assert.NotNull(serverChannel.LocalAddress);
-            var endPoint = (IPEndPoint)serverChannel.LocalAddress;
+            Task<IChannel> task = sb.BindAsync(address);
+            Assert.True(task.Wait(DefaultTimeout), "Server bind timed out");
+            this.serverChannel = task.Result;
+            Assert.NotNull(this.serverChannel.LocalAddress);
+            var endPoint = (IPEndPoint)this.serverChannel.LocalAddress;
 
             Bootstrap cb = new Bootstrap()
-                .Group(this.clientGroup)
+                .Group(this.group)
                 .Channel<TcpChannel>()
                 .Handler(new ChannelHandlerAdapter());
 
-            var client = (Task<IChannel>)cb.RegisterAsync();
-            Assert.True(client.Wait(DefaultTimeout));
-            IChannel cc = client.Result;
-            Task task = cc.ConnectAsync(endPoint);
+            // connect to server
+            task = (Task<IChannel>)cb.RegisterAsync();
             Assert.True(task.Wait(DefaultTimeout));
+            this.clientChannel = task.Result;
+            Task connectTask = this.clientChannel.ConnectAsync(endPoint);
+            Assert.True(connectTask.Wait(DefaultTimeout), "Connect to server timed out");
 
             // Attempt to connect again
-            task = cc.ConnectAsync(endPoint);
-            var exception = Assert.Throws<AggregateException>(() => task.Wait(DefaultTimeout));
-            var aggregatedException = (AggregateException)exception.InnerExceptions[0];
-            Assert.IsType<OperationException>(aggregatedException.InnerExceptions[0]);
-            var operationException = (OperationException)aggregatedException.InnerExceptions[0];
+            connectTask = this.clientChannel.ConnectAsync(endPoint);
+            var exception = Assert.Throws<AggregateException>(() => connectTask.Wait(DefaultTimeout));
+            Assert.IsType<OperationException>(exception.InnerExceptions[0]);
+            var operationException = (OperationException)exception.InnerExceptions[0];
             Assert.Equal("EISCONN", operationException.Name); // socket is already connected
         }
 
         public void Dispose()
         {
-            this.clientGroup.ShutdownGracefullyAsync(TimeSpan.Zero, TimeSpan.Zero).Wait(DefaultTimeout);
-            this.serverGroup.ShutdownGracefullyAsync(TimeSpan.Zero, TimeSpan.Zero).Wait(DefaultTimeout);
+            this.clientChannel?.CloseAsync().Wait(DefaultTimeout);
+            this.serverChannel?.CloseAsync().Wait(DefaultTimeout);
+            this.group.ShutdownGracefullyAsync(TimeSpan.Zero, TimeSpan.Zero).Wait(DefaultTimeout);
         }
     }
 }

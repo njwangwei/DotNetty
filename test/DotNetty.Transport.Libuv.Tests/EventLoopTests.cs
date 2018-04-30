@@ -7,12 +7,13 @@ namespace DotNetty.Transport.Libuv.Tests
     using System.Threading;
     using System.Threading.Tasks;
     using DotNetty.Common.Concurrency;
+    using DotNetty.Tests.Common;
     using Xunit;
+    using Xunit.Abstractions;
+    using static TestUtil;
 
-    public sealed class EventLoopTests : IDisposable
+    public sealed class EventLoopTests : TestBase, IDisposable
     {
-        static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
-
         readonly EventLoop eventLoop;
         readonly NoOp noOp;
 
@@ -43,13 +44,13 @@ namespace DotNetty.Transport.Libuv.Tests
             {
                 if (Interlocked.Increment(ref this.count) >= this.expected)
                 {
-                    this.EndTime = DateTime.Now.Ticks;
+                    this.EndTime = DateTime.UtcNow.Ticks;
                     this.completionSource.TryComplete();
                 }
             }
         }
 
-        public EventLoopTests()
+        public EventLoopTests(ITestOutputHelper output) : base(output)
         {
             this.eventLoop = new EventLoop(null, null);
             this.noOp = new NoOp();
@@ -100,7 +101,7 @@ namespace DotNetty.Transport.Libuv.Tests
 
             var channel = new TcpChannel();
             var exception = Assert.Throws<AggregateException>(() => this.eventLoop.RegisterAsync(channel).Wait(DefaultTimeout));
-            Assert.IsType<RejectedExecutionException>(exception.InnerExceptions[0]);
+            Assert.IsType<RejectedExecutionException>(exception.InnerException);
             Assert.False(channel.Open);
         }
 
@@ -115,15 +116,18 @@ namespace DotNetty.Transport.Libuv.Tests
                 this.eventLoop.Execute(new NoOp());
             }
 
-            long time = DateTime.UtcNow.Ticks;
+            long startTime = DateTime.UtcNow.Ticks;
+
             Assert.True(this.eventLoop.IsShuttingDown);
             Assert.False(this.eventLoop.IsShutdown);
-            Assert.True(task.Wait(DefaultTimeout));
+            Assert.True(task.Wait(DefaultTimeout), "Loop shutdown timed out");
 
-            time = DateTime.UtcNow.Ticks - time;
-            Assert.True(time > 0);
-            TimeSpan duration = TimeSpan.FromTicks(time);
-            Assert.True(duration.TotalSeconds >= 1);
+            Assert.True(this.eventLoop.IsShuttingDown);
+            Assert.True(this.eventLoop.IsShutdown);
+
+            long time = DateTime.UtcNow.Ticks - startTime;
+            long duration = (long)TimeSpan.FromTicks(time).TotalMilliseconds;
+            Assert.True(duration >= 1000, $"Expecting shutdown quite period >= 1000 milliseconds, but was {duration}");
         }
 
         [Fact]
@@ -157,7 +161,7 @@ namespace DotNetty.Transport.Libuv.Tests
             Assert.True(rejected, "Submitted tasks must be rejected after 2 second timeout");
             Assert.True(this.eventLoop.IsShuttingDown);
             Assert.True(this.eventLoop.IsShutdown);
-            Assert.True(task.Wait(DefaultTimeout));
+            Assert.True(task.Wait(DefaultTimeout), "Loop shutdown timed out");
         }
 
         public void Dispose()

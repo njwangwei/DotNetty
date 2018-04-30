@@ -11,22 +11,17 @@ namespace DotNetty.Transport.Libuv.Native
     using System.Runtime.InteropServices;
     using DotNetty.Buffers;
 
-    public sealed class ReadOperation : IDisposable
+    sealed class ReadOperation : IDisposable
     {
-        readonly IByteBuffer buffer;
-        readonly INativeUnsafe nativeUnsafe;
-
-        GCHandle gcHandle;
         int status;
         bool endOfStream;
+        IByteBuffer buffer;
         OperationException error;
+        GCHandle pin;
 
-        internal ReadOperation(INativeUnsafe nativeUnsafe, IByteBuffer buffer)
+        internal ReadOperation()
         {
-            this.nativeUnsafe = nativeUnsafe;
-            this.buffer = buffer;
-            this.status = 0;
-            this.endOfStream = false;
+            this.Reset();
         }
 
         internal IByteBuffer Buffer => this.buffer;
@@ -44,31 +39,52 @@ namespace DotNetty.Transport.Libuv.Native
             this.status = statusCode;
             this.endOfStream = statusCode == NativeMethods.EOF;
             this.error = operationException;
-            this.nativeUnsafe.FinishRead(this);
         }
 
-        internal uv_buf_t GetBuffer()
+        internal uv_buf_t GetBuffer(IByteBuffer buf)
         {
-            Debug.Assert(!this.gcHandle.IsAllocated, $"{nameof(ReadOperation)} has already been initialized and not released yet.");
+            Debug.Assert(!this.pin.IsAllocated);
 
-            IByteBuffer buf = this.buffer;
-            this.gcHandle = GCHandle.Alloc(buf.Array, GCHandleType.Pinned);
-            IntPtr arrayHandle = this.gcHandle.AddrOfPinnedObject();
+            // Do not pin the buffer again if it is already pinned
+            IntPtr arrayHandle = IntPtr.Zero;
+            if (buf.HasMemoryAddress)
+            {
+                arrayHandle = buf.AddressOfPinnedMemory();
+            }
+            int index = buf.WriterIndex;
 
-            int index = buf.ArrayOffset + buf.WriterIndex;
+            if (arrayHandle == IntPtr.Zero)
+            {
+                this.pin = GCHandle.Alloc(buf.Array, GCHandleType.Pinned);
+                arrayHandle = this.pin.AddrOfPinnedObject();
+                index += buf.ArrayOffset;
+            }
             int length = buf.WritableBytes;
+            this.buffer = buf;
 
             return new uv_buf_t(arrayHandle + index, length);
         }
 
+        internal void Reset()
+        {
+            this.status = 0;
+            this.endOfStream = false;
+            this.buffer = Unpooled.Empty;
+            this.error = null;
+        }
+
         void Release()
         {
-            if (this.gcHandle.IsAllocated)
+            if (this.pin.IsAllocated)
             {
-                this.gcHandle.Free();
+                this.pin.Free();
             }
         }
 
-        public void Dispose() => this.Release();
+        public void Dispose()
+        {
+            this.Release();
+            this.Reset();
+        }
     }
 }

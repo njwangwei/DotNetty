@@ -14,6 +14,9 @@ namespace DotNetty.Transport.Libuv.Native
         [DllImport("libc", SetLastError = true)]
         static extern int setsockopt(int socket, int level, int option_name, IntPtr option_value, uint option_len);
 
+        [DllImport("libc", SetLastError = true)]
+        static extern unsafe int getsockopt(int socket, int level, int option_name, byte* optionValue, int* optionLen);
+
         const int SOL_SOCKET_LINUX = 0x0001;
         const int SO_REUSEADDR_LINUX = 0x0002;
         const int SO_REUSEPORT_LINUX = 0x000f;
@@ -22,20 +25,37 @@ namespace DotNetty.Transport.Libuv.Native
         const int SO_REUSEADDR_OSX = 0x0004;
         const int SO_REUSEPORT_OSX = 0x0200;
 
-        internal static unsafe void ReuseAddress(NativeHandle handle, bool value)
+        internal static unsafe bool GetReuseAddress(IntPtr socket)
         {
-            IntPtr socket = IntPtr.Zero;
-            NativeMethods.uv_fileno(handle.Handle, ref socket);
-            int optionValue = value ? 1 : 0;
-
+            int value = 0;
             int status = 0;
+            int optLen = sizeof(int);
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                status = setsockopt(socket.ToInt32(), SOL_SOCKET_LINUX, SO_REUSEADDR_LINUX, (IntPtr)(&optionValue), sizeof(int));
+                status = getsockopt(socket.ToInt32(), SOL_SOCKET_LINUX, SO_REUSEADDR_LINUX, (byte*)&value, &optLen);
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             {
-                status = setsockopt(socket.ToInt32(), SOL_SOCKET_OSX, SO_REUSEADDR_OSX, (IntPtr)(&optionValue), sizeof(int));
+                status = getsockopt(socket.ToInt32(), SOL_SOCKET_OSX, SO_REUSEADDR_OSX, (byte*)&value, &optLen);
+            }
+            if (status != 0)
+            {
+                throw new SocketException(Marshal.GetLastWin32Error());
+            }
+
+            return value != 0;
+        }
+
+        internal static unsafe void SetReuseAddress(IntPtr socket, int value)
+        {
+            int status = 0;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                status = setsockopt(socket.ToInt32(), SOL_SOCKET_LINUX, SO_REUSEADDR_LINUX, (IntPtr)(&value), sizeof(int));
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                status = setsockopt(socket.ToInt32(), SOL_SOCKET_OSX, SO_REUSEADDR_OSX, (IntPtr)(&value), sizeof(int));
             }
             if (status != 0)
             {
@@ -43,20 +63,36 @@ namespace DotNetty.Transport.Libuv.Native
             }
         }
 
-        internal static unsafe void ReusePort(NativeHandle handle, bool value)
+        internal static unsafe bool GetReusePort(IntPtr socket)
         {
-            IntPtr socket = IntPtr.Zero;
-            NativeMethods.uv_fileno(handle.Handle, ref socket);
-            int optionValue = value ? 1 : 0;
-
+            int value = 0;
             int status = 0;
+            int optLen = sizeof(int);
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                status = setsockopt(socket.ToInt32(), SOL_SOCKET_LINUX, SO_REUSEPORT_LINUX, (IntPtr)(&optionValue), sizeof(int));
+                status = getsockopt(socket.ToInt32(), SOL_SOCKET_LINUX, SO_REUSEPORT_LINUX, (byte*)&value, &optLen);
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             {
-                status = setsockopt(socket.ToInt32(), SOL_SOCKET_OSX, SO_REUSEPORT_OSX, (IntPtr)(&optionValue), sizeof(int));
+                status = getsockopt(socket.ToInt32(), SOL_SOCKET_OSX, SO_REUSEPORT_OSX, (byte*)&value, &optLen);
+            }
+            if (status != 0)
+            {
+                throw new SocketException(Marshal.GetLastWin32Error());
+            }
+            return value != 0;
+        }
+
+        internal static unsafe void SetReusePort(IntPtr socket, int value)
+        {
+            int status = 0;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                status = setsockopt(socket.ToInt32(), SOL_SOCKET_LINUX, SO_REUSEPORT_LINUX, (IntPtr)(&value), sizeof(int));
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                status = setsockopt(socket.ToInt32(), SOL_SOCKET_OSX, SO_REUSEPORT_OSX, (IntPtr)(&value), sizeof(int));
             }
             if (status != 0)
             {

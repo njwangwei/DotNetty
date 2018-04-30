@@ -13,6 +13,7 @@ namespace DotNetty.Transport.Libuv.Native
     {
         protected static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<NativeHandle>();
         static readonly uv_close_cb CloseCallback = OnCloseHandle;
+        protected readonly uv_handle_type HandleType;
         internal IntPtr Handle;
 
         protected NativeHandle(uv_handle_type handleType)
@@ -20,20 +21,24 @@ namespace DotNetty.Transport.Libuv.Native
             this.HandleType = handleType;
         }
 
-        internal uv_handle_type HandleType { get; }
+        internal IntPtr LoopHandle()
+        {
+            this.Validate();
+            return ((uv_handle_t*)this.Handle)->loop;
+        }
 
-        internal bool IsValid
+        protected bool IsValid
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get => this.Handle != IntPtr.Zero;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected internal void Validate()
+        protected void Validate()
         {
             if (!this.IsValid)
             {
-                NativeMethods.ThrowObjectDisposedException($"{this.HandleType} has already been disposed {this.GetType()}");
+                NativeMethods.ThrowObjectDisposedException($"{this.GetType()}");
             }
         }
 
@@ -42,6 +47,8 @@ namespace DotNetty.Transport.Libuv.Native
             this.Validate();
             NativeMethods.uv_unref(this.Handle);
         }
+
+        internal bool IsActive => this.IsValid && NativeMethods.uv_is_active(this.Handle) > 0;
 
         internal void CloseHandle()
         {
@@ -87,7 +94,7 @@ namespace DotNetty.Transport.Libuv.Native
             }
 
             // Release memory
-            Marshal.FreeHGlobal(handle);
+            NativeMethods.FreeMemory(handle);
             nativeHandle?.OnClosed();
         }
 

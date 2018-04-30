@@ -12,6 +12,11 @@ namespace DotNetty.Buffers
     using DotNetty.Common;
     using DotNetty.Common.Utilities;
 
+    /// Wraps another <see cref="IByteBuffer"/>.
+    /// 
+    /// It's important that the {@link #readerIndex()} and {@link #writerIndex()} will not do any adjustments on the
+    /// indices on the fly because of internal optimizations made by {@link ByteBufUtil#writeAscii(ByteBuf, CharSequence)}
+    /// and {@link ByteBufUtil#writeUtf8(ByteBuf, CharSequence)}.
     class WrappedByteBuffer : IByteBuffer
     {
         protected readonly IByteBuffer Buf;
@@ -22,6 +27,12 @@ namespace DotNetty.Buffers
 
             this.Buf = buf;
         }
+
+        public bool HasMemoryAddress => this.Buf.HasMemoryAddress;
+
+        public ref byte GetPinnableMemoryAddress() => ref this.Buf.GetPinnableMemoryAddress();
+
+        public IntPtr AddressOfPinnedMemory() => this.Buf.AddressOfPinnedMemory();
 
         public int Capacity => this.Buf.Capacity;
 
@@ -36,6 +47,8 @@ namespace DotNetty.Buffers
         public IByteBufferAllocator Allocator => this.Buf.Allocator;
 
         public IByteBuffer Unwrap() => this.Buf;
+
+        public bool IsDirect => this.Buf.IsDirect;
 
         public int ReaderIndex => this.Buf.ReaderIndex;
 
@@ -197,6 +210,10 @@ namespace DotNetty.Buffers
             return this;
         }
 
+        public ICharSequence GetCharSequence(int index, int length, Encoding encoding) => this.Buf.GetCharSequence(index, length, encoding);
+
+        public string GetString(int index, int length, Encoding encoding) => this.Buf.GetString(index, length, encoding);
+
         public virtual IByteBuffer SetBoolean(int index, bool value)
         {
             this.Buf.SetBoolean(index, value);
@@ -327,11 +344,15 @@ namespace DotNetty.Buffers
 
         public virtual Task<int> SetBytesAsync(int index, Stream src, int length, CancellationToken cancellationToken) => this.Buf.SetBytesAsync(index, src, length, cancellationToken);
 
+        public int SetString(int index, string value, Encoding encoding) => this.Buf.SetString(index, value, encoding);
+
         public virtual IByteBuffer SetZero(int index, int length)
         {
             this.Buf.SetZero(index, length);
             return this;
         }
+
+        public int SetCharSequence(int index, ICharSequence sequence, Encoding encoding) => this.Buf.SetCharSequence(index, sequence, encoding);
 
         public virtual bool ReadBoolean() => this.Buf.ReadBoolean();
 
@@ -418,6 +439,10 @@ namespace DotNetty.Buffers
             this.Buf.ReadBytes(output, length);
             return this;
         }
+
+        public ICharSequence ReadCharSequence(int length, Encoding encoding) => this.Buf.ReadCharSequence(length, encoding);
+
+        public string ReadString(int length, Encoding encoding) => this.Buf.ReadString(length, encoding);
 
         public virtual IByteBuffer SkipBytes(int length)
         {
@@ -557,6 +582,10 @@ namespace DotNetty.Buffers
             return this;
         }
 
+        public int WriteCharSequence(ICharSequence sequence, Encoding encoding) => this.Buf.WriteCharSequence(sequence, encoding);
+
+        public int WriteString(string value, Encoding encoding) => this.Buf.WriteString(value, encoding);
+
         public virtual int IndexOf(int fromIndex, int toIndex, byte value) => this.Buf.IndexOf(fromIndex, toIndex, value);
 
         public virtual int BytesBefore(byte value) => this.Buf.BytesBefore(value);
@@ -565,13 +594,13 @@ namespace DotNetty.Buffers
 
         public virtual int BytesBefore(int index, int length, byte value) => this.Buf.BytesBefore(index, length, value);
 
-        public virtual int ForEachByte(ByteProcessor processor) => this.Buf.ForEachByte(processor);
+        public virtual int ForEachByte(IByteProcessor processor) => this.Buf.ForEachByte(processor);
 
-        public virtual int ForEachByte(int index, int length, ByteProcessor processor) => this.Buf.ForEachByte(index, length, processor);
+        public virtual int ForEachByte(int index, int length, IByteProcessor processor) => this.Buf.ForEachByte(index, length, processor);
 
-        public virtual int ForEachByteDesc(ByteProcessor processor) => this.Buf.ForEachByteDesc(processor);
+        public virtual int ForEachByteDesc(IByteProcessor processor) => this.Buf.ForEachByteDesc(processor);
 
-        public virtual int ForEachByteDesc(int index, int length, ByteProcessor processor) => this.Buf.ForEachByteDesc(index, length, processor);
+        public virtual int ForEachByteDesc(int index, int length, IByteProcessor processor) => this.Buf.ForEachByteDesc(index, length, processor);
 
         public virtual IByteBuffer Copy() => this.Buf.Copy();
 

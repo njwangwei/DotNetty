@@ -6,29 +6,32 @@ namespace DotNetty.Transport.Libuv.Native
     using DotNetty.Common.Internal.Logging;
     using System;
     using System.Diagnostics;
+    using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
 
     abstract unsafe class NativeRequest : IDisposable
     {
         protected static readonly IInternalLogger Logger = InternalLoggerFactory.GetInstance<NativeRequest>();
 
+        readonly uv_req_type requestType;
         protected internal IntPtr Handle;
 
         protected NativeRequest(uv_req_type requestType, int size)
         {
-            int totalSize = NativeMethods.uv_req_size(requestType).ToInt32() + size;
-            IntPtr handle = Marshal.AllocHGlobal(totalSize);
+            IntPtr handle = NativeMethods.Allocate(requestType, size);
 
             GCHandle gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
             *(IntPtr*)handle = GCHandle.ToIntPtr(gcHandle);
 
             this.Handle = handle;
-            this.RequestType = requestType;
+            this.requestType = requestType;
         }
 
-        protected bool IsValid => this.Handle != IntPtr.Zero;
-
-        public uv_req_type RequestType { get; }
+        protected bool IsValid
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => this.Handle != IntPtr.Zero;
+        }
 
         protected void CloseHandle()
         {
@@ -52,7 +55,7 @@ namespace DotNetty.Transport.Libuv.Native
             }
 
             // Release memory
-            Marshal.FreeHGlobal(handle);
+            NativeMethods.FreeMemory(handle);
             this.Handle = IntPtr.Zero;
         }
 
@@ -67,7 +70,7 @@ namespace DotNetty.Transport.Libuv.Native
             }
             catch (Exception exception)
             {
-                Logger.Error($"{nameof(NativeHandle)} {this.Handle} error whilst closing handle.", exception);
+                Logger.Error($"{this.requestType} {this.Handle} error whilst closing handle.", exception);
 
                 // For finalizer, we cannot allow this to escape.
                 if (disposing) throw;

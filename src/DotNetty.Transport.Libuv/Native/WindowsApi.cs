@@ -21,7 +21,7 @@ namespace DotNetty.Transport.Libuv.Native
         public WindowsApi()
         {
             var fileCompletionInfo = new FILE_COMPLETION_INFORMATION { Key = IntPtr.Zero, Port = IntPtr.Zero };
-            this.fileCompletionInfoPtr = Marshal.AllocHGlobal(Marshal.SizeOf(fileCompletionInfo));
+            this.fileCompletionInfoPtr = NativeMethods.Allocate(Marshal.SizeOf(fileCompletionInfo));
             Marshal.StructureToPtr(fileCompletionInfo, this.fileCompletionInfoPtr, false);
         }
 
@@ -71,14 +71,34 @@ namespace DotNetty.Transport.Libuv.Native
         static extern uint NtSetInformationFile(IntPtr FileHandle, out IO_STATUS_BLOCK IoStatusBlock, IntPtr FileInformation, uint Length, int FileInformationClass);
 
         [DllImport("ws2_32.dll", SetLastError = true)]
-        static extern SocketError setsockopt(IntPtr socketHandle, int level, int optionName, ref int optionValue, uint optionLength);
+        static extern SocketError setsockopt(IntPtr socketHandle, SocketOptionLevel level, SocketOptionName optionName, ref int optionValue, uint optionLength);
 
-        internal static void ReuseAddress(NativeHandle handle, bool value)
+        [DllImport("ws2_32.dll", SetLastError = true)]
+        static extern SocketError getsockopt(IntPtr socketHandle, SocketOptionLevel level, SocketOptionName optionName, ref int optionValue, ref int optionLength);
+
+        internal static bool GetReuseAddress(IntPtr socket)
         {
-            IntPtr socket = IntPtr.Zero;
-            NativeMethods.uv_fileno(handle.Handle, ref socket);
-            int optionValue = value ? 1 : 0;
-            SocketError status = setsockopt(socket, (int)SocketOptionLevel.Socket, (int)SocketOptionName.ReuseAddress, ref optionValue, 4);
+            int value = GetSocketOption(socket, SocketOptionName.ReuseAddress);
+            return value != 0;
+        }
+
+        internal static void SetReuseAddress(IntPtr socket, int value) => SetSocketOption(socket, SocketOptionName.ReuseAddress, value);
+
+        static int GetSocketOption(IntPtr socket, SocketOptionName optionName)
+        {
+            int optLen = 4;
+            int value = 0;
+            SocketError status = getsockopt(socket, SocketOptionLevel.Socket, optionName, ref value, ref optLen);
+            if (status == SocketError.SocketError)
+            {
+                throw new SocketException(Marshal.GetLastWin32Error());
+            }
+            return value;
+        }
+
+        static void SetSocketOption(IntPtr socket, SocketOptionName optionName, int value)
+        {
+            SocketError status = setsockopt(socket, SocketOptionLevel.Socket, optionName, ref value, 4);
             if (status == SocketError.SocketError)
             {
                 throw new SocketException(Marshal.GetLastWin32Error());
@@ -90,7 +110,7 @@ namespace DotNetty.Transport.Libuv.Native
             IntPtr handle = this.fileCompletionInfoPtr;
             if (handle != IntPtr.Zero)
             {
-                Marshal.FreeHGlobal(handle);
+                NativeMethods.FreeMemory(handle);
             }
             this.fileCompletionInfoPtr = IntPtr.Zero;
         }

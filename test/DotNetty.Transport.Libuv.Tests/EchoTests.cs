@@ -13,19 +13,23 @@ namespace DotNetty.Transport.Libuv.Tests
     using Xunit;
     using Xunit.Abstractions;
 
+    using static TestUtil;
+
+    [Collection(LibuvTransport)]
     public sealed class EchoTests : IDisposable
     {
-        static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
-
         readonly ITestOutputHelper output;
         readonly Random random = new Random();
         readonly byte[] data = new byte[1048576];
         readonly IEventLoopGroup group;
+        IChannel serverChannel;
+        IChannel clientChannel;
 
         public EchoTests(ITestOutputHelper output)
         {
             this.output = output;
             this.group = new EventLoopGroup(1);
+            this.random.NextBytes(this.data);
         }
 
         [Fact]
@@ -76,40 +80,28 @@ namespace DotNetty.Transport.Libuv.Tests
             sb.ChildOption(ChannelOption.AutoRead, autoRead);
             cb.Option(ChannelOption.AutoRead, autoRead);
 
-            var address = new IPEndPoint(IPAddress.Loopback, 0);
-
             // start server
-            Task<IChannel> server = sb.BindAsync(address);
-            Assert.True(server.Wait(DefaultTimeout));
-            IChannel sc = server.Result;
-            Assert.NotNull(sc.LocalAddress);
-            var endPoint = (IPEndPoint)sc.LocalAddress;
+            Task<IChannel> task = sb.BindAsync(LoopbackAnyPort);
+            Assert.True(task.Wait(DefaultTimeout), "Server bind timed out");
+            this.serverChannel = task.Result;
+            Assert.NotNull(this.serverChannel.LocalAddress);
+            var endPoint = (IPEndPoint)this.serverChannel.LocalAddress;
 
             // connect to server
-            Task<IChannel> client = cb.ConnectAsync(endPoint);
-            Assert.True(client.Wait(DefaultTimeout));
-            IChannel cc = client.Result;
-            Assert.NotNull(cc.LocalAddress);
-            Assert.Equal(endPoint, cc.RemoteAddress);
+            task = cb.ConnectAsync(endPoint);
+            Assert.True(task.Wait(DefaultTimeout), "Connect to server timed out");
+            this.clientChannel = task.Result;
+            Assert.NotNull(this.clientChannel.LocalAddress);
 
             for (int i = 0; i < this.data.Length;)
             {
                 int length = Math.Min(this.random.Next(1024 * 64), this.data.Length - i);
                 IByteBuffer buf = Unpooled.WrappedBuffer(this.data, i, length);
-                cc.WriteAndFlushAsync(buf);
+                this.clientChannel.WriteAndFlushAsync(buf);
                 i += length;
             }
 
-            Assert.True(Task.WhenAll(ch.Completion, sh.Completion).Wait(DefaultTimeout));
-
-            sh.Channel?.CloseAsync().Wait(DefaultTimeout);
-            ch.Channel?.CloseAsync().Wait(DefaultTimeout);
-            sc.CloseAsync().Wait(DefaultTimeout);
-        }
-
-        public void Dispose()
-        {
-            this.group.ShutdownGracefullyAsync(TimeSpan.Zero, TimeSpan.Zero).Wait(DefaultTimeout);
+            Assert.True(Task.WhenAll(ch.Completion, sh.Completion).Wait(DefaultTimeout), "Echo read/write timed out");
         }
 
         sealed class ErrorOutputHandler : ChannelHandlerAdapter
@@ -131,7 +123,7 @@ namespace DotNetty.Transport.Libuv.Tests
             readonly ITestOutputHelper output;
             readonly TaskCompletionSource completion;
 
-            internal IChannel Channel;
+            IChannel channel;
             int counter;
 
             public EchoHandler(bool autoRead, byte[] expected, ITestOutputHelper output)
@@ -144,7 +136,7 @@ namespace DotNetty.Transport.Libuv.Tests
 
             public override void ChannelActive(IChannelHandlerContext ctx)
             {
-                this.Channel = ctx.Channel;
+                this.channel = ctx.Channel;
                 if (!this.autoRead)
                 {
                     ctx.Read();
@@ -158,14 +150,16 @@ namespace DotNetty.Transport.Libuv.Tests
                 var actual = new byte[msg.ReadableBytes];
                 msg.ReadBytes(actual);
                 int lastIdx = this.counter;
+
+                Assert.True(lastIdx + actual.Length <= this.expected.Length);
                 for (int i = 0; i < actual.Length; i++)
                 {
                     Assert.Equal(this.expected[i + lastIdx], actual[i]);
                 }
 
-                if (this.Channel.Parent != null)
+                if (this.channel.Parent != null)
                 {
-                    this.Channel.WriteAsync(Unpooled.WrappedBuffer(actual));
+                    this.channel.WriteAsync(Unpooled.WrappedBuffer(actual));
                 }
 
                 this.counter += actual.Length;
@@ -196,6 +190,13 @@ namespace DotNetty.Transport.Libuv.Tests
                 ctx.CloseAsync();
                 this.completion.TrySetException(cause);
             }
+        }
+
+        public void Dispose()
+        {
+            this.clientChannel?.CloseAsync().Wait(DefaultTimeout);
+            this.serverChannel?.CloseAsync().Wait(DefaultTimeout);
+            this.group.ShutdownGracefullyAsync(TimeSpan.Zero, TimeSpan.Zero).Wait(DefaultTimeout);
         }
     }
 }
